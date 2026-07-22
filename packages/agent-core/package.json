@@ -1,0 +1,44 @@
+{
+  "name": "@workcopilot/agent-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "latest",
+    "@prisma/adapter-better-sqlite3": "^7.9.0",
+    "@prisma/client": "latest",
+    "@workcopilot/browser-recorder": "workspace:*",
+    "@workcopilot/credential-provider": "workspace:*",
+    "@workcopilot/feishu-adapter": "workspace:*",
+    "@workcopilot/git-analyzer": "workspace:*",
+    "@workcopilot/memory-engine": "workspace:*",
+    "@workcopilot/model-provider": "workspace:*",
+    "@workcopilot/playwright-runtime": "workspace:*",
+    "@workcopilot/tool-registry": "workspace:*",
+    "@workcopilot/workflow-engine": "workspace:*",
+    "better-sqlite3": "^13.0.1",
+    "hono": "latest",
+    "ws": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/ws": "latest"
+  }
+}

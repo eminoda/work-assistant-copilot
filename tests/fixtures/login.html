@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>WorkCopilot Login Fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Demo Login</h1>
+      <form id="login-form">
+        <label>Username <input aria-label="Username" name="username" /></label>
+        <label>Password <input aria-label="Password" name="password" type="password" /></label>
+        <button type="submit">Login</button>
+      </form>
+      <p id="result" aria-label="Login result"></p>
+    </main>
+    <script>
+      document.querySelector('#login-form').addEventListener('submit', (event) => {
+        event.preventDefault()
+        document.querySelector('#result').textContent = 'Login successful'
+      })
+    </script>
+  </body>
+</html>

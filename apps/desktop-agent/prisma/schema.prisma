@@ -1,0 +1,109 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model UserSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ModelProvider {
+  id           String   @id @default(cuid())
+  name         String
+  providerType String
+  baseUrl      String?
+  credentialKey String
+  model        String
+  enabled      Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Workflow {
+  id          String              @id @default(cuid())
+  name        String
+  intent      String
+  description String              @default("")
+  steps       Json
+  status      String              @default("ACTIVE")
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+  executions  WorkflowExecution[]
+}
+
+model Recording {
+  id        String   @id @default(cuid())
+  name      String
+  intent    String
+  url       String?
+  events    Json
+  status    String   @default("CAPTURED")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model WorkflowExecution {
+  id         String    @id
+  workflowId String
+  workflow   Workflow  @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  status     String
+  startedAt  DateTime
+  finishedAt DateTime?
+  result     Json?
+  error      String?
+  events     Json
+}
+
+model CredentialMetadata {
+  id        String   @id @default(cuid())
+  name      String
+  provider  String
+  key       String   @unique
+  createdAt DateTime @default(now())
+}
+
+model Project {
+  id        String        @id @default(cuid())
+  name      String
+  path      String        @unique
+  gitUrl    String?
+  createdAt DateTime      @default(now())
+  snapshots GitSnapshot[]
+}
+
+model GitSnapshot {
+  id         String   @id @default(cuid())
+  projectId  String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  commitHash String
+  changes    Json
+  summary    String?
+  createdAt  DateTime @default(now())
+}
+
+model DailyMemory {
+  id        String   @id @default(cuid())
+  date      String
+  content   String
+  source    String
+  metadata  Json
+  createdAt DateTime @default(now())
+  @@index([date])
+}
+
+model Report {
+  id        String   @id @default(cuid())
+  type      String
+  startDate String
+  endDate   String
+  content   String
+  createdAt DateTime @default(now())
+  @@index([type, startDate, endDate])
+}

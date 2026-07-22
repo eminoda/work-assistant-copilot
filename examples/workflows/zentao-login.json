@@ -1,0 +1,47 @@
+{
+  "name": "Zentao Login",
+  "intent": "browser.login",
+  "description": "Parameterized Zentao login template. Replace the URL and selectors through a new recording.",
+  "version": 1,
+  "steps": [
+    {
+      "id": "open-zentao",
+      "tool": "browser.open",
+      "params": { "url": "https://zentao.example.com/" }
+    },
+    {
+      "id": "resolve-account",
+      "tool": "credential.get",
+      "params": { "key": "zentao.account" }
+    },
+    {
+      "id": "input-account",
+      "tool": "browser.input",
+      "params": {
+        "target": { "placeholder": "Username", "confidence": 0.8 },
+        "credentialKey": "zentao.account"
+      }
+    },
+    {
+      "id": "resolve-password",
+      "tool": "credential.get",
+      "params": { "key": "zentao.password" }
+    },
+    {
+      "id": "input-password",
+      "tool": "browser.input",
+      "params": {
+        "target": { "placeholder": "Password", "confidence": 0.8 },
+        "credentialKey": "zentao.password"
+      }
+    },
+    {
+      "id": "submit-login",
+      "tool": "browser.click",
+      "params": {
+        "target": { "role": "button", "text": "Login", "confidence": 0.9 }
+      },
+      "requiresConfirmation": true
+    }
+  ]
+}

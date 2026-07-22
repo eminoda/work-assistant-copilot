@@ -1,0 +1,37 @@
+{
+  "name": "OA Form Submit",
+  "intent": "browser.form.submit",
+  "description": "Generic OA form template with mandatory human confirmation before submission.",
+  "version": 1,
+  "steps": [
+    {
+      "id": "open-oa-form",
+      "tool": "browser.open",
+      "params": { "url": "https://oa.example.com/forms/new" }
+    },
+    {
+      "id": "input-title",
+      "tool": "browser.input",
+      "params": {
+        "target": { "ariaLabel": "Title", "confidence": 0.9 },
+        "value": "Weekly status"
+      }
+    },
+    {
+      "id": "input-content",
+      "tool": "browser.input",
+      "params": {
+        "target": { "ariaLabel": "Content", "confidence": 0.9 },
+        "value": "Generated from confirmed local work memory."
+      }
+    },
+    {
+      "id": "submit-form",
+      "tool": "browser.click",
+      "params": {
+        "target": { "role": "button", "text": "Submit", "confidence": 0.95 }
+      },
+      "requiresConfirmation": true
+    }
+  ]
+}

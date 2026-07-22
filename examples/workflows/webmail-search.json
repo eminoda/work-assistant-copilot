@@ -1,0 +1,34 @@
+{
+  "name": "Webmail Search",
+  "intent": "browser.search.mail",
+  "description": "Generic webmail search template generated through the same browser tools.",
+  "version": 1,
+  "steps": [
+    {
+      "id": "open-webmail",
+      "tool": "browser.open",
+      "params": { "url": "https://mail.example.com/" }
+    },
+    {
+      "id": "input-query",
+      "tool": "browser.input",
+      "params": {
+        "target": { "role": "searchbox", "placeholder": "Search mail", "confidence": 0.9 },
+        "value": "project update"
+      }
+    },
+    {
+      "id": "run-search",
+      "tool": "browser.click",
+      "params": {
+        "target": { "role": "button", "text": "Search", "confidence": 0.9 }
+      }
+    },
+    {
+      "id": "capture-results",
+      "tool": "browser.snapshot",
+      "params": {},
+      "saveAs": "mailSearchResult"
+    }
+  ]
+}
