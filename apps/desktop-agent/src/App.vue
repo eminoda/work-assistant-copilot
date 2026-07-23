@@ -18,7 +18,11 @@ const endpoints: Record<string, string> = { Workflows: '/api/workflows', Memory:
       <DashboardView v-if="active === 'Dashboard'" :connected="runtime.connected.value" />
       <DataListView v-else-if="endpoints[active]" :title="active" :endpoint="endpoints[active]!" />
       <ChatView v-else-if="active === 'Chat'" />
-      <SettingsView v-else-if="active === 'Settings'" @connect="runtime.connect" />
+      <SettingsView
+        v-else-if="active === 'Settings'"
+        :connected="runtime.connected.value"
+        :connect="runtime.connect"
+      />
     </main>
   </div>
 </template>

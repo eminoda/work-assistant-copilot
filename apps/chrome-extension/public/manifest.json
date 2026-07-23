@@ -3,7 +3,7 @@
   "name": "WorkCopilot",
   "version": "0.1.0",
   "description": "Local-first browser workflow recorder and runner",
-  "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting"],
+  "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting", "webNavigation", "cookies"],
   "host_permissions": ["http://127.0.0.1:4317/*", "http://localhost:4317/*", "<all_urls>"],
   "background": { "service_worker": "background.js", "type": "module" },
   "side_panel": { "default_path": "sidepanel.html" },
@@ -11,6 +11,7 @@
   "content_scripts": [{
     "matches": ["<all_urls>"],
     "js": ["content.js"],
-    "run_at": "document_start"
+    "run_at": "document_idle",
+    "all_frames": false
   }]
 }

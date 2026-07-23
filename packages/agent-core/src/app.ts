@@ -7,7 +7,7 @@ import { streamSSE } from 'hono/streaming'
 import { z } from 'zod'
 import { ToolRegistry, type AgentEvent } from '@workcopilot/tool-registry'
 import { WorkflowEngine, workflowSchema, type ExecutionResult } from '@workcopilot/workflow-engine'
-import { recordingSchema, recordingToWorkflow } from '@workcopilot/browser-recorder'
+import { recordingSchema, recordingToWorkflow, sortRecordingEvents } from '@workcopilot/browser-recorder'
 import { registerBrowserTools, PlaywrightRuntime } from '@workcopilot/playwright-runtime'
 import { LocalCredentialProvider, getOrCreateLocalToken } from '@workcopilot/credential-provider'
 import { gitSnapshotSchema, scanGitRepository } from '@workcopilot/git-analyzer'
@@ -36,7 +36,9 @@ export async function createServices(store = new WorkCopilotStore()): Promise<Ap
   const credentials = new LocalCredentialProvider()
   const token = await getOrCreateLocalToken(credentials)
   const registry = new ToolRegistry()
-  const browser = registerBrowserTools(registry)
+  const browser = registerBrowserTools(registry, new PlaywrightRuntime(), {
+    resolveCredential: (key) => credentials.get(key),
+  })
   registerExportTools(registry)
   registry.register({
     name: 'credential.get', description: 'Resolve a local credential into the execution context',
@@ -128,14 +130,15 @@ export function createApp(services: AppServices) {
   app.delete('/api/workflows/:id', async (c) => { await services.store.deleteWorkflow(c.req.param('id')); return c.body(null, 204) })
   app.post('/api/recordings', async (c) => {
     const recording = recordingSchema.parse(await c.req.json())
-    const firstUrl = recording.events[0]?.url
+    const events = sortRecordingEvents(recording.events)
+    const firstUrl = events[0]?.url
     await services.store.saveRecording({
       name: recording.name,
       intent: recording.intent,
-      events: recording.events,
+      events,
       ...(firstUrl ? { url: firstUrl } : {}),
     })
-    const workflow = await services.store.saveWorkflow(recordingToWorkflow(recording))
+    const workflow = await services.store.saveWorkflow(recordingToWorkflow({ ...recording, events }))
     return c.json({ workflow }, 201)
   })
 
@@ -144,14 +147,27 @@ export function createApp(services: AppServices) {
     const workflow = await services.store.getWorkflow(c.req.param('id'))
     if (!workflow) return c.json({ error: 'Workflow not found' }, 404)
     const requestId = randomUUID()
+    console.log(`[execute] queued ${requestId} workflow=${workflow.id} name=${workflow.name}`)
     const promise = services.engine.execute(
       workflow,
-      (event) => services.events.publish(event),
+      (event) => {
+        const detail = [event.tool, event.message].filter(Boolean).join(' ')
+        console.log(`[execute] ${requestId} ${event.type}${detail ? ` ${detail}` : ''}`)
+        services.events.publish(event)
+      },
       undefined,
       requestId,
     ).then(async (result) => {
+      if (result.status === 'FAILED' || result.status === 'CANCELLED') {
+        console.error(`[execute] ${requestId} ${result.status}: ${result.error ?? 'unknown error'}`)
+      } else {
+        console.log(`[execute] ${requestId} ${result.status}`)
+      }
       await services.store.saveExecution(workflow.id, result)
       return result
+    }).catch((error) => {
+      console.error(`[execute] ${requestId} crashed`, error)
+      throw error
     })
     active.set(requestId, promise)
     void promise.finally(() => active.delete(requestId))

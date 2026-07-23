@@ -10,3 +10,5 @@ input, button { border-radius: 9px; border: 1px solid #34445c; padding: 9px 11px
 input { background: #0c111b; } button { cursor: pointer; background: #6d5dfc; border-color: transparent; font-weight: 650; }
 button.secondary { background: #202d42; } button.danger { background: #c8485c; }
 .workflow { padding-top: 10px; border-top: 1px solid #263348; } .notice { padding: 10px; border-radius: 10px; background: #16372f; color: #7be0c8; }
+.credential { display: grid; gap: 6px; font-size: 12px; color: #8fa0b8; }
+.credential input { width: 100%; }

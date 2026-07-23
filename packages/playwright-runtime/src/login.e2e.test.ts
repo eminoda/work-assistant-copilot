@@ -7,6 +7,8 @@ import { WorkflowEngine } from '@workcopilot/workflow-engine'
 import { PlaywrightRuntime, registerBrowserTools } from './index.js'
 
 describe('browser automation login loop', () => {
+  const previousHeadless = process.env.WORKCOPILOT_HEADLESS
+  process.env.WORKCOPILOT_HEADLESS = 'true'
   const runtime = new PlaywrightRuntime()
   const fixturePath = fileURLToPath(new URL('../../../tests/fixtures/login.html', import.meta.url))
   const server = createServer(async (_request, response) => {
@@ -20,6 +22,8 @@ describe('browser automation login loop', () => {
   afterAll(async () => {
     await runtime.close()
     await new Promise<void>((resolveClosed) => server.close(() => resolveClosed()))
+    if (previousHeadless === undefined) delete process.env.WORKCOPILOT_HEADLESS
+    else process.env.WORKCOPILOT_HEADLESS = previousHeadless
   })
 
   it('replays a validated login workflow', async () => {

@@ -110,6 +110,7 @@ export class WorkflowEngine {
     } catch (error) {
       const finishedAt = new Date().toISOString()
       const message = error instanceof Error ? error.message : String(error)
+      emit({ type: 'workflow.failed', executionId, message, timestamp: finishedAt })
       return { id: executionId, status: signal?.aborted ? 'CANCELLED' : 'FAILED', startedAt, finishedAt, outputs: Object.fromEntries(values), error: message, events }
     }
   }
