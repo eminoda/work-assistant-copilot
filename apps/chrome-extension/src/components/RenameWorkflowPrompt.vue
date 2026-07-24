@@ -70,7 +70,7 @@ function submit() {
   <div class="confirm-mask" role="dialog" aria-modal="true">
     <section class="card rename-dialog save-workflow-dialog">
       <strong>保存工作流</strong>
-      <p class="muted">填写名称与分类后保存。登录类型会把最后一页记为主页，下次优先用 Cookie 直达。</p>
+      <p class="muted">填写名称与分类后保存。登录类型会保存停录时的完整 Cookie 会话；下次先注入停录页做预登录，未跳转则跳过完整流程。</p>
 
       <label class="field">
         工作流名称

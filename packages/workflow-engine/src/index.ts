@@ -79,6 +79,25 @@ function resolveReferences(value: unknown, values: Map<string, unknown>): unknow
   return value
 }
 
+function raceWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.reject(new Error('Execution cancelled'))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new Error('Execution cancelled'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
+}
+
 export class WorkflowEngine {
   constructor(
     private readonly registry: ToolRegistry,
@@ -113,15 +132,19 @@ export class WorkflowEngine {
         for (let attempt = 0; attempt <= step.retries; attempt += 1) {
           try {
             const params = resolveReferences(step.params, values)
-            const result = await Promise.race([
-              this.registry.execute(step.tool, params, context),
-              new Promise((_, reject) => setTimeout(() => reject(new Error(`Step timed out: ${step.id}`)), step.timeoutMs)),
-            ])
+            const result = await raceWithAbort(
+              Promise.race([
+                this.registry.execute(step.tool, params, context),
+                new Promise((_, reject) => setTimeout(() => reject(new Error(`Step timed out: ${step.id}`)), step.timeoutMs)),
+              ]),
+              signal,
+            )
             if (step.saveAs) values.set(step.saveAs, result)
             lastError = undefined
             break
           } catch (error) {
             lastError = error
+            if (signal?.aborted) break
           }
         }
         if (lastError) throw lastError

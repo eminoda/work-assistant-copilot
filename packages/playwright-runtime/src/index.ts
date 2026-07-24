@@ -58,6 +58,10 @@ export class PlaywrightRuntime {
   #browser: Browser | undefined
   #page: Page | undefined
   #launching: Promise<Browser> | undefined
+  /** When false, closed-browser errors propagate (used during workflow execution). */
+  #relaunchOnClose = true
+  #onDisconnected: (() => void) | undefined
+  #closedNotified = false
 
   async #launchBrowser(): Promise<Browser> {
     // Default headed so desktop / local replay shows a real browser window.
@@ -66,6 +70,58 @@ export class PlaywrightRuntime {
       handleSIGINT: false,
       handleSIGTERM: false,
       handleSIGHUP: false,
+    })
+  }
+
+  setRelaunchOnClose(value: boolean) {
+    this.#relaunchOnClose = value
+  }
+
+  setDisconnectHandler(handler: (() => void) | undefined) {
+    this.#onDisconnected = handler
+  }
+
+  isConnected() {
+    return Boolean(this.#browser?.isConnected())
+  }
+
+  /** True when there is no live page (user closed the window, or never opened). */
+  isPageClosed() {
+    return !this.#page || this.#page.isClosed()
+  }
+
+  /** Session is gone: browser process dead, or the headed window/page was closed. */
+  isSessionOpen() {
+    return this.isConnected() && !this.isPageClosed()
+  }
+
+  #notifyClosed() {
+    if (this.#closedNotified) return
+    this.#closedNotified = true
+    const handler = this.#onDisconnected
+    this.reset()
+    try {
+      handler?.()
+    } catch {
+      // ignore listener errors
+    }
+  }
+
+  async #shutdownFromUserClose(reason: string) {
+    console.log(`[playwright] ${reason}`)
+    try {
+      await this.#browser?.close()
+    } catch {
+      // ignore
+    }
+    this.#notifyClosed()
+  }
+
+  #attachPageCloseListener(page: Page) {
+    page.on('close', () => {
+      // Closing the headed window often leaves the Chromium process alive —
+      // treat page close as end-of-session and tear the browser down.
+      void this.#shutdownFromUserClose('page closed — shutting down browser session')
     })
   }
 
@@ -80,14 +136,19 @@ export class PlaywrightRuntime {
     if (this.#page?.isClosed()) this.#page = undefined
 
     if (!this.#browser) {
+      this.#closedNotified = false
       this.#launching ??= this.#launchBrowser().finally(() => {
         this.#launching = undefined
       })
       this.#browser = await this.#launching
+      this.#browser.on('disconnected', () => {
+        this.#notifyClosed()
+      })
     }
 
     if (!this.#page || this.#page.isClosed()) {
       this.#page = await this.#browser.newPage()
+      this.#attachPageCloseListener(this.#page)
     }
     return this.#page
   }
@@ -97,9 +158,11 @@ export class PlaywrightRuntime {
       return await run(await this.page())
     } catch (error) {
       if (!isClosedTargetError(error)) throw error
-      // User closed the window, or a previous run left a dead handle — relaunch once.
+      if (!this.#relaunchOnClose) throw error
+      // Stale handle from a previous run — relaunch once.
       try { await this.#browser?.close() } catch { /* ignore */ }
       this.reset()
+      this.#closedNotified = false
       return run(await this.page())
     }
   }
@@ -186,7 +249,7 @@ export class PlaywrightRuntime {
 
   async close(): Promise<void> {
     try { await this.#browser?.close() } catch { /* ignore */ }
-    this.reset()
+    this.#notifyClosed()
   }
 }
 
@@ -286,17 +349,34 @@ export function registerBrowserTools(
         `[playwright:cookies] setCookies credentialKey=${credentialKey ?? '(inline)'} injecting=${resolved.map((cookie) => cookie.name).join(',')}`,
       )
       return runtime.withPage(async (page) => {
-        await page.context().addCookies(
-          resolved!.map((cookie) => ({
+        // Playwright requires either `url` OR (`domain` + `path`) — not a mix that confuses path inference.
+        // Prefer domain+path from the saved jar so path stays `/` even when homeUrl includes `/selfcare/#/...`.
+        const payload = resolved!.map((cookie) => {
+          const domain = cookie.domain.replace(/^\./, '')
+          const sameSite = cookie.sameSite as 'Strict' | 'Lax' | 'None' | undefined
+          const secure = sameSite === 'None' ? true : Boolean(cookie.secure)
+          return {
             name: cookie.name,
             value: cookie.value,
-            domain: cookie.domain,
-            path: cookie.path || '/',
-            ...(cookie.expires && cookie.expires > 0 ? { expires: cookie.expires } : {}),
-            ...(cookie.httpOnly !== undefined ? { httpOnly: cookie.httpOnly } : {}),
-            ...(cookie.secure !== undefined ? { secure: cookie.secure } : {}),
-            ...(cookie.sameSite ? { sameSite: cookie.sameSite as 'Strict' | 'Lax' | 'None' } : {}),
-          })),
+            domain,
+            path: cookie.path && cookie.path.length > 0 ? cookie.path : '/',
+            ...(typeof cookie.expires === 'number' && cookie.expires > 0 ? { expires: cookie.expires } : {}),
+            httpOnly: Boolean(cookie.httpOnly),
+            secure,
+            ...(sameSite ? { sameSite } : {}),
+          }
+        })
+        await page.context().addCookies(payload)
+        const probeOrigin = (() => {
+          try {
+            return url ? `${new URL(url).origin}/` : `https://${payload[0]!.domain}/`
+          } catch {
+            return `https://${payload[0]!.domain}/`
+          }
+        })()
+        const stored = await page.context().cookies(probeOrigin)
+        console.log(
+          `[playwright:cookies] after addCookies origin=${probeOrigin} stored=${stored.map((cookie) => cookie.name).join(',') || '(none)'}`,
         )
         await runtime.logCookies('after browser.setCookies', page)
         return { success: true, url: page.url() || url }

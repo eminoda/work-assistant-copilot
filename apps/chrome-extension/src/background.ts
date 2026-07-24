@@ -15,6 +15,9 @@ const touchedOrigins = new Set<string>()
 let cookieFlushTimer: ReturnType<typeof setTimeout> | undefined
 /** When set, the next navigation fills expectedUrl on this wait event. */
 let pendingWaitEventId: string | undefined
+/** First-visit cookies per host — compared at stop to find login session cookies. */
+const baselineCookiesByHost = new Map<string, Map<string, CookieRecord>>()
+const latestCookiesByHost = new Map<string, Map<string, CookieRecord>>()
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (tab.windowId) await chrome.sidePanel.open({ windowId: tab.windowId })
@@ -155,32 +158,77 @@ function pushEvent(partial: Omit<RecordingEvent, 'id' | 'seq'> & { id?: string; 
   broadcastStatus()
 }
 
-async function snapshotCookiesForUrl(url: string) {
-  if (!isHttpUrl(url)) return
-  const list = await chrome.cookies.getAll({ url })
-  if (!list.length) return
-  pushEvent({
-    type: 'cookies',
-    url,
-    timestamp: new Date().toISOString(),
-    cookies: list.map(toCookieRecord),
-    cookieCredentialKey: sessionCredentialKey(url),
-    ...(activeTabId !== undefined ? { tabId: activeTabId } : {}),
-  })
+function cookieIdentity(cookie: Pick<CookieRecord, 'name' | 'domain' | 'path'>) {
+  return `${cookie.name}|${cookie.domain}|${cookie.path || '/'}`
 }
 
-async function snapshotTouchedOrigins() {
+function hostOf(url: string) {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return ''
+  }
+}
+
+async function refreshCookieState(url: string, options?: { forceBaseline?: boolean }) {
+  if (!isHttpUrl(url)) return
+  rememberOrigin(url)
+  const list = await chrome.cookies.getAll({ url })
+  const host = hostOf(url)
+  if (!host) return
+  const map = new Map(list.map((cookie) => [cookieIdentity(toCookieRecord(cookie)), toCookieRecord(cookie)]))
+  if (options?.forceBaseline || !baselineCookiesByHost.has(host)) {
+    baselineCookiesByHost.set(host, new Map(map))
+  }
+  latestCookiesByHost.set(host, map)
+}
+
+async function refreshTouchedCookieState() {
   const origins = [...touchedOrigins]
   if (lastHttpUrl) rememberOrigin(lastHttpUrl)
   for (const origin of origins.length ? origins : lastHttpUrl ? [new URL(lastHttpUrl).origin] : []) {
-    await snapshotCookiesForUrl(`${origin}/`)
+    await refreshCookieState(`${origin}/`)
+  }
+}
+
+/** Emit final host cookies at stop for session reuse; log new/changed vs first-visit baseline. */
+function pushSessionCookieDiff() {
+  const hosts = new Set([...baselineCookiesByHost.keys(), ...latestCookiesByHost.keys()])
+  for (const host of hosts) {
+    const baseline = baselineCookiesByHost.get(host) ?? new Map()
+    const latest = latestCookiesByHost.get(host) ?? new Map()
+    if (!latest.size) continue
+
+    const changed: CookieRecord[] = []
+    for (const [key, cookie] of latest) {
+      const previous = baseline.get(key)
+      if (!previous || previous.value !== cookie.value) changed.push(cookie)
+    }
+    // Session reuse needs the full end-state jar. Diff alone drops cookies that already
+    // existed on the login page (e.g. GWSESSIONID) even though they are required later.
+    const finalCookies = [...latest.values()]
+    const url = lastHttpUrl && hostOf(lastHttpUrl) === host
+      ? lastHttpUrl
+      : `https://${host}/`
+    pushEvent({
+      type: 'cookies',
+      url,
+      timestamp: new Date().toISOString(),
+      cookies: finalCookies,
+      cookieCredentialKey: sessionCredentialKey(url),
+      ...(activeTabId !== undefined ? { tabId: activeTabId } : {}),
+    })
+    console.log(
+      `[recorder:cookies] host=${host} final=${finalCookies.map((cookie) => cookie.name).join(',') || '(none)'} `
+      + `diff=${changed.map((cookie) => cookie.name).join(',') || '(none)'}`,
+    )
   }
 }
 
 function scheduleCookieSnapshot(url?: string) {
   if (cookieFlushTimer) clearTimeout(cookieFlushTimer)
   cookieFlushTimer = setTimeout(() => {
-    void (url ? snapshotCookiesForUrl(url) : snapshotTouchedOrigins())
+    void (url ? refreshCookieState(url) : refreshTouchedCookieState())
   }, 400)
 }
 
@@ -336,6 +384,8 @@ chrome.runtime.onMessage.addListener((message: RecorderMessage, sender, sendResp
       lastHttpUrl = ''
       activeTabId = undefined
       touchedOrigins.clear()
+      baselineCookiesByHost.clear()
+      latestCookiesByHost.clear()
       persistState()
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
       if (tab?.id) {
@@ -343,6 +393,9 @@ chrome.runtime.onMessage.addListener((message: RecorderMessage, sender, sendResp
         await ensureContentScript(tab.id)
       }
       await captureCurrentNavigation()
+      // First-visit baseline after the entry page has a chance to set cookies (e.g. acw_tc).
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      if (lastHttpUrl) await refreshCookieState(lastHttpUrl, { forceBaseline: true })
       const payload = { active, paused, extractArmed, events: sortEvents(events) }
       sendResponse(payload)
       broadcastStatus()
@@ -353,7 +406,9 @@ chrome.runtime.onMessage.addListener((message: RecorderMessage, sender, sendResp
   if (message.type === 'recorder.stop') {
     void (async () => {
       if (cookieFlushTimer) clearTimeout(cookieFlushTimer)
-      await snapshotTouchedOrigins()
+      await refreshTouchedCookieState()
+      // Keep recorder active while emitting the session cookie diff event.
+      pushSessionCookieDiff()
       active = false
       paused = false
       extractArmed = false

@@ -69,7 +69,59 @@ export function useRuntime() {
   }
 
   async function execute(id: string) {
-    return request(`/api/workflows/${id}/execute`, { method: 'POST' })
+    return request(`/api/workflows/${id}/execute`, { method: 'POST' }) as Promise<{ executionId: string }>
+  }
+
+  async function cancelExecution(executionId: string) {
+    return request(`/api/executions/${encodeURIComponent(executionId)}/cancel`, {
+      method: 'POST',
+    }) as Promise<{ ok: boolean; status: string }>
+  }
+
+  async function waitForExecution(
+    executionId: string,
+    options: {
+      intervalMs?: number
+      timeoutMs?: number
+      onUpdate?: (execution: { status?: string; phase?: string; error?: string }) => void
+    } = {},
+  ) {
+    const intervalMs = options.intervalMs ?? 800
+    const timeoutMs = options.timeoutMs ?? 10 * 60_000
+    const started = Date.now()
+    let sawRunning = false
+    while (Date.now() - started < timeoutMs) {
+      let execution: { status?: string; phase?: string; error?: string }
+      try {
+        execution = await request(`/api/executions/${encodeURIComponent(executionId)}`) as {
+          status?: string
+          phase?: string
+          error?: string
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        // Runtime restarted or record missing after a completed run.
+        if (sawRunning && /not found/i.test(message)) {
+          return { status: 'CANCELLED', error: message }
+        }
+        throw error
+      }
+      if (!execution || execution.error === 'Execution not found') {
+        if (sawRunning) return { status: 'CANCELLED', error: 'Execution not found' }
+        await new Promise((resolve) => setTimeout(resolve, intervalMs))
+        continue
+      }
+      options.onUpdate?.(execution)
+      const status = String(execution.status || '').toUpperCase()
+      if (status === 'RUNNING') {
+        sawRunning = true
+        await new Promise((resolve) => setTimeout(resolve, intervalMs))
+        continue
+      }
+      if (status) return execution
+      await new Promise((resolve) => setTimeout(resolve, intervalMs))
+    }
+    throw new Error(`Execution timed out: ${executionId}`)
   }
 
   async function deleteWorkflow(id: string) {
@@ -94,6 +146,8 @@ export function useRuntime() {
     saveRecording,
     getWorkflow,
     execute,
+    cancelExecution,
+    waitForExecution,
     deleteWorkflow,
     deleteAllWorkflows,
   }

@@ -23,6 +23,21 @@ export const cookieRecordSchema = z.object({
 })
 export type CookieRecord = z.infer<typeof cookieRecordSchema>
 
+export function cookieIdentity(cookie: Pick<CookieRecord, 'name' | 'domain' | 'path'>): string {
+  return `${cookie.name}|${cookie.domain}|${cookie.path || '/'}`
+}
+
+/** Cookies that are new or whose value changed vs the first-visit baseline. */
+export function diffCookies(baseline: CookieRecord[], current: CookieRecord[]): CookieRecord[] {
+  const before = new Map(baseline.map((cookie) => [cookieIdentity(cookie), cookie]))
+  const changed: CookieRecord[] = []
+  for (const cookie of current) {
+    const previous = before.get(cookieIdentity(cookie))
+    if (!previous || previous.value !== cookie.value) changed.push(cookie)
+  }
+  return changed
+}
+
 export const recordingEventSchema = z.object({
   id: z.string().default(() => randomUUID()),
   type: z.enum(['click', 'input', 'navigation', 'submit', 'tab', 'cookies', 'waitNavigation', 'extract']),
@@ -188,24 +203,13 @@ export function recordingToWorkflow(input: RecordingInput): Workflow {
   }, [])
 
   const kind = recording.kind
-  // Login workflows: inject latest session cookies first for replay / session reuse.
   if (kind === 'login') {
-    const cookieStep = [...steps].reverse().find((step) => step.tool === 'browser.setCookies')
-    if (cookieStep && steps[0]?.tool !== 'browser.setCookies') {
-      steps.unshift({
-        ...cookieStep,
-        id: 'step-session',
-        params: {
-          ...cookieStep.params,
-          ...(homeUrl ? { url: homeUrl } : {}),
-        },
-      })
-      steps.forEach((step, index) => {
-        step.id = `step-${index + 1}`
-      })
+    // Login session cookies are applied only during pretest (inject → open homeUrl).
+    // Do not replay setCookies mid-flow — that re-injected first-visit noise (e.g. acw_tc).
+    for (let index = steps.length - 1; index >= 0; index -= 1) {
+      if (steps[index]?.tool === 'browser.setCookies') steps.splice(index, 1)
     }
     // homeUrl is for session pretest; login redirect already lands there.
-    // Drop trailing open(home) / setCookies(home) so replay does not hit the final page twice.
     if (homeUrl) {
       while (steps.length > 0) {
         const last = steps[steps.length - 1]
@@ -214,16 +218,16 @@ export function recordingToWorkflow(input: RecordingInput): Workflow {
         if (typeof url !== 'string') break
         const onHome = isSameDocumentLocation(url, homeUrl) || isSameDocumentLocation(homeUrl, url)
         if (!onHome) break
-        if (last.tool === 'browser.open' || last.tool === 'browser.setCookies') {
+        if (last.tool === 'browser.open') {
           steps.pop()
           continue
         }
         break
       }
-      steps.forEach((step, index) => {
-        step.id = `step-${index + 1}`
-      })
     }
+    steps.forEach((step, index) => {
+      step.id = `step-${index + 1}`
+    })
   }
 
   const intent = recording.intent || (kind === 'login' ? 'browser.login' : 'browser.app')

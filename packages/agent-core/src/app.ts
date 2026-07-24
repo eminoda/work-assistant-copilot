@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { ToolRegistry, type AgentEvent } from '@workcopilot/tool-registry'
 import { WorkflowEngine, workflowSchema, type ExecutionResult, type Workflow } from '@workcopilot/workflow-engine'
 import { recordingSchema, recordingToWorkflow, sortRecordingEvents, lastRecordedUrl, sessionCredentialKeyForUrl } from '@workcopilot/browser-recorder'
-import { registerBrowserTools, PlaywrightRuntime } from '@workcopilot/playwright-runtime'
+import { registerBrowserTools, PlaywrightRuntime, shouldSkipNavigation } from '@workcopilot/playwright-runtime'
 import { LocalCredentialProvider, getOrCreateLocalToken } from '@workcopilot/credential-provider'
 import { gitSnapshotSchema, scanGitRepository } from '@workcopilot/git-analyzer'
 import { fallbackSummary, rawMemoryFromGit } from '@workcopilot/memory-engine'
@@ -109,38 +109,85 @@ export async function createServices(store = new WorkCopilotStore()): Promise<Ap
   return { store, registry, engine: new WorkflowEngine(registry), credentials, browser, token, events }
 }
 
-function navigationKey(url: string) {
+/** After a successful login run, refresh workflow session cookies from the live browser. */
+async function persistLoginSessionFromBrowser(input: {
+  services: AppServices
+  workflowId: string
+  homeUrl: string
+  executionId: string
+}) {
+  const { services, workflowId, homeUrl, executionId } = input
   try {
-    const parsed = new URL(url)
-    let hash = parsed.hash
-    if (hash === '#' || hash === '#/') hash = ''
-    parsed.hash = hash
-    parsed.pathname = parsed.pathname.replace(/\/+$/, '') || '/'
-    return `${parsed.origin}${parsed.pathname}${parsed.search}${parsed.hash}`
-  } catch {
-    return url
+    const page = await services.browser.page()
+    const origin = `${new URL(homeUrl).origin}/`
+    const cookies = await page.context().cookies(origin)
+    if (!cookies.length) {
+      console.warn(`[execute] ${executionId} no browser cookies to persist for ${origin}`)
+      return
+    }
+    const payload = cookies.map((cookie) => ({
+      name: cookie.name,
+      value: cookie.value,
+      domain: cookie.domain,
+      path: cookie.path || '/',
+      ...(cookie.expires >= 0 ? { expires: cookie.expires } : {}),
+      httpOnly: cookie.httpOnly,
+      secure: cookie.secure,
+      ...(cookie.sameSite && cookie.sameSite !== 'None'
+        ? { sameSite: cookie.sameSite }
+        : cookie.sameSite === 'None'
+          ? { sameSite: 'None' as const }
+          : {}),
+    }))
+    const workflowKey = `workflow.${workflowId}.session`
+    const hostKey = sessionCredentialKeyForUrl(homeUrl)
+    const raw = JSON.stringify(payload)
+    await services.credentials.save(workflowKey, raw)
+    await services.credentials.save(hostKey, raw)
+    console.log(
+      `[execute] ${executionId} persisted session cookies key=${workflowKey} names=${payload.map((cookie) => cookie.name).join(',')}`,
+    )
+  } catch (error) {
+    console.warn(`[execute] ${executionId} persist session cookies failed`, error)
   }
 }
 
-/** Login workflows: open homeUrl + inject cookies; if no redirect, treat as success and skip full steps. */
+function cancelledResult(executionId: string, startedAt: string, events: AgentEvent[], error = 'Execution cancelled'): ExecutionResult {
+  const finishedAt = new Date().toISOString()
+  events.push({
+    type: 'workflow.failed',
+    executionId,
+    message: error,
+    timestamp: finishedAt,
+  })
+  return {
+    id: executionId,
+    status: 'CANCELLED',
+    startedAt,
+    finishedAt,
+    outputs: {},
+    error,
+    events,
+  }
+}
+
+/** Login workflows: inject session cookies on homeUrl; if no redirect, skip full steps. */
 async function tryLoginSessionReuse(input: {
   workflow: Workflow & { id: string }
   services: AppServices
   executionId: string
   onEvent: (event: AgentEvent) => void
+  signal?: AbortSignal
 }): Promise<ExecutionResult | null> {
-  const { workflow, services, executionId, onEvent } = input
+  const { workflow, services, executionId, onEvent, signal } = input
   const homeUrl = workflow.homeUrl
   if (!homeUrl) return null
 
-  const keys = new Set<string>()
-  for (const step of workflow.steps) {
-    if (step.tool !== 'browser.setCookies') continue
-    const key = step.params.credentialKey
-    if (typeof key === 'string' && key) keys.add(key)
-  }
-  keys.add(sessionCredentialKeyForUrl(homeUrl))
-  keys.add(`workflow.${workflow.id}.session`)
+  // Prefer workflow-bound login-diff cookies; fall back to host session.
+  const keys = [
+    `workflow.${workflow.id}.session`,
+    sessionCredentialKeyForUrl(homeUrl),
+  ]
 
   const startedAt = new Date().toISOString()
   const events: AgentEvent[] = []
@@ -156,24 +203,43 @@ async function tryLoginSessionReuse(input: {
   })
 
   try {
-    const values = new Map<string, unknown>()
-    const context = { executionId, emit, values }
-    let injected = false
-    for (const key of keys) {
-      const raw = await services.credentials.get(key)
-      if (!raw) continue
-      values.set(`credential:${key}`, raw)
-      await services.registry.execute('browser.setCookies', { credentialKey: key, url: homeUrl }, context)
-      injected = true
-    }
-    if (!injected) return null
+    if (signal?.aborted) return cancelledResult(executionId, startedAt, events)
 
+    const values = new Map<string, unknown>()
+    const context = { executionId, emit, values, ...(signal ? { signal } : {}) }
+    let sessionKey: string | undefined
+    let raw: string | undefined
+    for (const key of keys) {
+      raw = await services.credentials.get(key)
+      if (raw) {
+        sessionKey = key
+        break
+      }
+    }
+    if (!sessionKey || !raw) {
+      console.log(`[execute] ${executionId} session reuse skipped — no session credential`)
+      return null
+    }
+
+    let cookieNames: string[] = []
+    try {
+      const parsed = JSON.parse(raw) as Array<{ name?: string }>
+      cookieNames = parsed.map((cookie) => cookie.name).filter((name): name is string => Boolean(name))
+    } catch {
+      // keep empty
+    }
+    console.log(
+      `[execute] ${executionId} session pretest key=${sessionKey} cookies=${cookieNames.join(',') || '(none)'} home=${homeUrl}`,
+    )
+
+    values.set(`credential:${sessionKey}`, raw)
+    await services.registry.execute('browser.setCookies', { credentialKey: sessionKey, url: homeUrl }, context)
+    if (signal?.aborted) return cancelledResult(executionId, startedAt, events)
     await services.registry.execute('browser.open', { url: homeUrl }, context)
+    if (signal?.aborted) return cancelledResult(executionId, startedAt, events)
     const page = await services.browser.page()
     const current = page.url()
-    const stayed =
-      navigationKey(current) === navigationKey(homeUrl)
-      || current.replace(/\/+$/, '') === homeUrl.replace(/\/+$/, '')
+    const stayed = shouldSkipNavigation(current, homeUrl)
 
     if (!stayed) {
       emit({
@@ -198,10 +264,14 @@ async function tryLoginSessionReuse(input: {
       status: 'SUCCESS',
       startedAt,
       finishedAt,
-      outputs: { sessionReused: true, url: current },
+      outputs: { sessionReused: true, url: current, sessionKey },
       events,
     }
   } catch (error) {
+    if (signal?.aborted) {
+      console.log(`[execute] ${executionId} session reuse cancelled`)
+      return cancelledResult(executionId, startedAt, events)
+    }
     console.warn('[execute] session reuse failed', error)
     return null
   }
@@ -289,10 +359,16 @@ export function createApp(services: AppServices) {
   })
 
   const active = new Map<string, Promise<ExecutionResult>>()
+  const controllers = new Map<string, AbortController>()
+  const phases = new Map<string, 'workflow' | 'browser'>()
+
   app.post('/api/workflows/:id/execute', async (c) => {
     const workflow = await services.store.getWorkflow(c.req.param('id'))
     if (!workflow) return c.json({ error: 'Workflow not found' }, 404)
     const requestId = randomUUID()
+    const controller = new AbortController()
+    controllers.set(requestId, controller)
+    phases.set(requestId, 'workflow')
     console.log(`[execute] queued ${requestId} workflow=${workflow.id} name=${workflow.name} kind=${workflow.kind}`)
 
     const run = async (): Promise<ExecutionResult> => {
@@ -302,29 +378,77 @@ export function createApp(services: AppServices) {
         services.events.publish(event)
       }
 
-      if (workflow.kind === 'login' && workflow.homeUrl) {
-        const reused = await tryLoginSessionReuse({
-          workflow,
-          services,
-          executionId: requestId,
-          onEvent,
-        })
-        if (reused) {
-          console.log(`[execute] ${requestId} login session reuse success — skip full workflow`)
-          return reused
+      let resolveBrowserClosed = () => {}
+      const browserClosed = new Promise<void>((resolve) => {
+        resolveBrowserClosed = resolve
+      })
+
+      services.browser.setRelaunchOnClose(false)
+      services.browser.setDisconnectHandler(() => {
+        const phase = phases.get(requestId) ?? 'workflow'
+        if (phase === 'workflow' && !controller.signal.aborted) {
+          console.log(`[execute] ${requestId} browser disconnected — cancelling workflow`)
+          controller.abort()
+        } else {
+          console.log(`[execute] ${requestId} browser disconnected — ending session hold`)
         }
-        console.log(`[execute] ${requestId} login session reuse missed — run full workflow`)
+        resolveBrowserClosed()
+      })
+
+      const holdUntilBrowserCloses = async (result: ExecutionResult): Promise<ExecutionResult> => {
+        if (result.status === 'CANCELLED' || !services.browser.isSessionOpen()) return result
+        phases.set(requestId, 'browser')
+        console.log(`[execute] ${requestId} workflow ${result.status} — holding until browser closes`)
+        // Event + poll: closing the headed window may not always emit browser.disconnected.
+        await Promise.race([
+          browserClosed,
+          (async () => {
+            while (services.browser.isSessionOpen()) {
+              await new Promise((resolve) => setTimeout(resolve, 400))
+            }
+            resolveBrowserClosed()
+          })(),
+        ])
+        return result
       }
 
-      return services.engine.execute(workflow, onEvent, undefined, requestId).then(async (result) => {
-        if (result.status !== 'SUCCESS' || workflow.kind !== 'login' || !workflow.homeUrl) return result
+      try {
+        if (workflow.kind === 'login' && workflow.homeUrl) {
+          const reused = await tryLoginSessionReuse({
+            workflow,
+            services,
+            executionId: requestId,
+            onEvent,
+            signal: controller.signal,
+          })
+          if (controller.signal.aborted) {
+            return cancelledResult(requestId, new Date().toISOString(), [])
+          }
+          if (reused) {
+            if (reused.status === 'CANCELLED') return reused
+            console.log(`[execute] ${requestId} login session reuse success — skip full workflow`)
+            await persistLoginSessionFromBrowser({
+              services,
+              workflowId: workflow.id,
+              homeUrl: workflow.homeUrl,
+              executionId: requestId,
+            })
+            return holdUntilBrowserCloses(reused)
+          }
+          console.log(`[execute] ${requestId} login session reuse missed — run full workflow`)
+        }
+
+        const result = await services.engine.execute(workflow, onEvent, controller.signal, requestId)
+        if (result.status !== 'SUCCESS' || workflow.kind !== 'login' || !workflow.homeUrl) {
+          return holdUntilBrowserCloses(result)
+        }
         try {
           const page = await services.browser.page()
           const current = page.url()
           if (/\/login(\/|$|\?|#)/i.test(current)) {
             const error = `登录流程结束仍在登录页：${current}（期望进入 ${workflow.homeUrl}）`
             console.error(`[execute] ${requestId} ${error}`)
-            return {
+            return holdUntilBrowserCloses({
               ...result,
               status: 'FAILED' as const,
               error,
@@ -337,13 +461,25 @@ export function createApp(services: AppServices) {
                   timestamp: new Date().toISOString(),
                 },
               ],
-            }
+            })
           }
+          await persistLoginSessionFromBrowser({
+            services,
+            workflowId: workflow.id,
+            homeUrl: workflow.homeUrl,
+            executionId: requestId,
+          })
         } catch (error) {
+          if (controller.signal.aborted) {
+            return { ...result, status: 'CANCELLED' as const, error: 'Execution cancelled' }
+          }
           console.warn(`[execute] ${requestId} post-login URL check failed`, error)
         }
-        return result
-      })
+        return holdUntilBrowserCloses(result)
+      } finally {
+        services.browser.setDisconnectHandler(undefined)
+        services.browser.setRelaunchOnClose(true)
+      }
     }
 
     const promise = run().then(async (result) => {
@@ -357,15 +493,38 @@ export function createApp(services: AppServices) {
     }).catch((error) => {
       console.error(`[execute] ${requestId} crashed`, error)
       throw error
+    }).finally(() => {
+      controllers.delete(requestId)
+      phases.delete(requestId)
     })
     active.set(requestId, promise)
     void promise.finally(() => active.delete(requestId))
     return c.json({ executionId: requestId }, 202)
   })
+
+  app.post('/api/executions/:id/cancel', async (c) => {
+    const id = c.req.param('id')
+    const controller = controllers.get(id)
+    if (!controller && !active.has(id)) {
+      return c.json({ error: 'Execution not found or already finished' }, 404)
+    }
+    console.log(`[execute] ${id} cancel requested`)
+    controller?.abort()
+    await services.browser.close()
+    return c.json({ ok: true, status: 'CANCELLED' })
+  })
+
   app.get('/api/executions/:id', async (c) => {
-    const pending = active.get(c.req.param('id'))
-    if (pending) return c.json({ id: c.req.param('id'), status: 'RUNNING' })
-    const execution = await services.store.getExecution(c.req.param('id'))
+    const id = c.req.param('id')
+    const pending = active.get(id)
+    if (pending) {
+      return c.json({
+        id,
+        status: 'RUNNING',
+        phase: phases.get(id) ?? 'workflow',
+      })
+    }
+    const execution = await services.store.getExecution(id)
     return execution ? c.json(execution) : c.json({ error: 'Execution not found' }, 404)
   })
   app.get('/api/events', (c) => streamSSE(c, async (stream) => {

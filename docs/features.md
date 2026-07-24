@@ -43,10 +43,13 @@
 
 **目标：** 用 Playwright 回放已保存的 Workflow，覆盖自动登录、打开应用等重复操作。
 
-**Cookie 约定：**
+**Cookie 约定（登录类型）：**
 
-- 录制中 cookie 新增/变更会快照，并像密码一样存入本地 credential（绑定该 workflow，如 `workflow.{id}.session`）
-- 下次执行先注入 cookie，避免已登录场景重复走登录页
+- 录制开始时记录「首次访问」cookie 作为 baseline（用于日志对比）
+- 结束录制时保存该站点**完整终态 cookie** 为会话凭证（如 `workflow.{id}.session`）；仅 diff 会漏掉登录页已存在的 `GWSESSIONID`
+- 完整登录成功后，Runtime 会用浏览器最新 cookie **回写**会话凭证，供下次预登录
+- 下次执行：向停录时的 `homeUrl` 注入该凭证并打开页面；**若未发生跳转**（会话仍有效）则跳过完整工作流；若被重定向到登录页，再跑完整录制步骤
+- 登录工作流步骤中不再回放 `setCookies`
 
 **工作流类型（完成录制时必选）：**
 

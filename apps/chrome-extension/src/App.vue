@@ -32,6 +32,10 @@ const detailWorkflow = shallowRef<WorkflowSummary | null>(null)
 const detailLoading = shallowRef(false)
 const detailError = shallowRef('')
 const detailDeleteId = shallowRef<string | null>(null)
+const runningWorkflowIds = shallowRef<string[]>([])
+const executionIdsByWorkflow = shallowRef<Record<string, string>>({})
+const pendingStopIds = shallowRef<string[]>([])
+const stoppedWorkflowIds = shallowRef<string[]>([])
 const runtime = useRuntime()
 
 let timerStartedAt = 0
@@ -242,9 +246,70 @@ function discardNaming() {
 }
 
 async function execute(id: string) {
-  const result = await runtime.execute(id)
-  message.value = `已排队执行：${result.executionId}`
+  if (runningWorkflowIds.value.includes(id)) return
+  runningWorkflowIds.value = [...runningWorkflowIds.value, id]
   if (view.value === 'detail') view.value = 'home'
+  try {
+    const result = await runtime.execute(id)
+    executionIdsByWorkflow.value = { ...executionIdsByWorkflow.value, [id]: result.executionId }
+    if (pendingStopIds.value.includes(id) || stoppedWorkflowIds.value.includes(id)) {
+      pendingStopIds.value = pendingStopIds.value.filter((item) => item !== id)
+      if (!stoppedWorkflowIds.value.includes(id)) {
+        stoppedWorkflowIds.value = [...stoppedWorkflowIds.value, id]
+      }
+      message.value = '正在停止…'
+      await runtime.cancelExecution(result.executionId)
+    } else {
+      message.value = `正在执行…`
+    }
+    const finished = await runtime.waitForExecution(result.executionId, {
+      onUpdate: (execution) => {
+        if (stoppedWorkflowIds.value.includes(id) || pendingStopIds.value.includes(id)) {
+          message.value = '正在停止…'
+          return
+        }
+        message.value = execution.phase === 'browser' ? '浏览器运行中…' : '正在执行…'
+      },
+    })
+    const status = String(finished.status || '').toUpperCase()
+    if (stoppedWorkflowIds.value.includes(id)) {
+      message.value = '已关闭浏览器'
+    } else {
+      message.value = status === 'SUCCESS'
+        ? '执行完成'
+        : status === 'CANCELLED'
+          ? '已停止'
+          : `执行结束：${status}${finished.error ? ` — ${finished.error}` : ''}`
+    }
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : '执行失败'
+  } finally {
+    pendingStopIds.value = pendingStopIds.value.filter((item) => item !== id)
+    stoppedWorkflowIds.value = stoppedWorkflowIds.value.filter((item) => item !== id)
+    const { [id]: _, ...rest } = executionIdsByWorkflow.value
+    executionIdsByWorkflow.value = rest
+    runningWorkflowIds.value = runningWorkflowIds.value.filter((item) => item !== id)
+  }
+}
+
+async function stopExecution(id: string) {
+  if (!stoppedWorkflowIds.value.includes(id)) {
+    stoppedWorkflowIds.value = [...stoppedWorkflowIds.value, id]
+  }
+  const executionId = executionIdsByWorkflow.value[id]
+  if (!executionId) {
+    if (!pendingStopIds.value.includes(id)) {
+      pendingStopIds.value = [...pendingStopIds.value, id]
+    }
+    message.value = '正在停止…'
+    return
+  }
+  message.value = '正在停止…'
+  try {
+    await runtime.cancelExecution(executionId)
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : '停止失败'
+  }
 }
 
 async function openWorkflowDetail(id: string) {
@@ -315,6 +380,12 @@ function onRuntimeMessage(message: RecorderState & { type?: string }) {
 
 onMounted(() => {
   chrome.runtime.onMessage.addListener(onRuntimeMessage)
+  const saved = runtime.token.value.trim()
+  if (saved) {
+    void runtime.connect(saved).catch((error) => {
+      message.value = error instanceof Error ? error.message : '自动连接 Runtime 失败'
+    })
+  }
 })
 
 onUnmounted(() => {
@@ -431,7 +502,9 @@ onUnmounted(() => {
       />
       <WorkflowList
         :workflows="[...runtime.workflows.value]"
+        :running-ids="runningWorkflowIds"
         @execute="execute"
+        @stop="stopExecution"
         @remove="removeWorkflow"
         @remove-all="removeAllWorkflows"
         @create="openRecording"

@@ -13,9 +13,11 @@ const props = defineProps<{
     createdAt?: string
     updatedAt?: string
   }>
+  runningIds?: string[]
 }>()
 const emit = defineEmits<{
   execute: [id: string]
+  stop: [id: string]
   remove: [id: string]
   removeAll: []
   create: []
@@ -32,6 +34,10 @@ function kindLabel(kind?: string, intent?: string) {
 function timeLabel(workflow: { createdAt?: string; updatedAt?: string }) {
   const stamp = formatWorkflowTime(workflow.updatedAt || workflow.createdAt)
   return stamp ? `更新于 ${stamp}` : ''
+}
+
+function isRunning(id: string) {
+  return Boolean(props.runningIds?.includes(id))
 }
 
 function askRemoveOne(id: string, name: string) {
@@ -97,12 +103,32 @@ function confirmPending() {
         <div class="actions" @click.stop>
           <button
             class="icon-btn play-btn"
+            :class="{ 'play-btn-running': isRunning(workflow.id) }"
             type="button"
-            title="运行"
-            aria-label="运行"
-            @click="emit('execute', workflow.id)"
+            :title="isRunning(workflow.id) ? '停止执行' : '运行'"
+            :aria-label="isRunning(workflow.id) ? '停止执行' : '运行'"
+            @click="isRunning(workflow.id) ? emit('stop', workflow.id) : emit('execute', workflow.id)"
           >
-            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+            <svg
+              v-if="isRunning(workflow.id)"
+              class="run-spinner"
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              aria-hidden="true"
+            >
+              <circle
+                cx="12"
+                cy="12"
+                r="9"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.5"
+                stroke-linecap="round"
+                stroke-dasharray="40 20"
+              />
+            </svg>
+            <svg v-else viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
               <path fill="currentColor" d="M8 5v14l11-7z" />
             </svg>
           </button>
@@ -111,6 +137,7 @@ function confirmPending() {
             type="button"
             title="删除"
             aria-label="删除"
+            :disabled="isRunning(workflow.id)"
             @click="askRemoveOne(workflow.id, workflow.name)"
           >
             <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">

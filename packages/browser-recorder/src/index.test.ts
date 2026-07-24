@@ -51,7 +51,7 @@ describe('recordingToWorkflow', () => {
     expect(workflow.steps[1]?.params.credentialKey).toBe('go.sheca.com.session')
   })
 
-  it('login workflows keep hash homeUrl and drop trailing open(home)', () => {
+  it('login workflows keep hash homeUrl and omit setCookies from replay steps', () => {
     const workflow = recordingToWorkflow({
       id: 'r7', name: 'Portal login', intent: 'browser.login', kind: 'login',
       events: [
@@ -76,17 +76,41 @@ describe('recordingToWorkflow', () => {
           id: 'e4', type: 'cookies', url: 'https://example.test/selfcare/#/appList',
           timestamp: new Date().toISOString(), seq: 4,
           cookieCredentialKey: 'example.test.session',
+          cookies: [
+            {
+              name: 'GWSESSIONID',
+              value: 'abc',
+              domain: 'example.test',
+              path: '/',
+            },
+          ],
         },
       ],
     })
     expect(workflow.kind).toBe('login')
     expect(workflow.homeUrl).toBe('https://example.test/selfcare/#/appList')
     expect(workflow.steps.map((step) => step.tool)).toEqual([
-      'browser.setCookies',
       'browser.open',
       'browser.click',
     ])
-    expect(workflow.steps.at(-1)?.tool).toBe('browser.click')
+    expect(workflow.steps.every((step) => step.tool !== 'browser.setCookies')).toBe(true)
+  })
+
+  it('diffCookies returns only new or changed cookies', async () => {
+    const { diffCookies } = await import('./index.js')
+    const baseline = [
+      { name: 'acw_tc', value: 'a', domain: 'go.sheca.com', path: '/' },
+      { name: 'GWSESSIONID', value: 'old', domain: 'go.sheca.com', path: '/' },
+    ]
+    const current = [
+      { name: 'acw_tc', value: 'a', domain: 'go.sheca.com', path: '/' },
+      { name: 'GWSESSIONID', value: 'new', domain: 'go.sheca.com', path: '/' },
+      { name: 'extra', value: '1', domain: 'go.sheca.com', path: '/' },
+    ]
+    expect(diffCookies(baseline, current).map((cookie) => cookie.name).sort()).toEqual([
+      'GWSESSIONID',
+      'extra',
+    ])
   })
 
   it('maps waitNavigation to browser.waitNavigation and skips extract', () => {

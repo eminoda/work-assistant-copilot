@@ -127,6 +127,24 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .workflow-time { color: #8a9bb3; }
 .actions { display: flex; gap: 6px; flex: 0 0 auto; }
 .play-btn { color: #7be0c8; }
+.play-btn-running {
+  color: #7be0c8;
+  border-color: rgba(123, 224, 200, 0.45);
+  background: rgba(123, 224, 200, 0.08);
+  cursor: pointer;
+}
+.play-btn-running:hover {
+  border-color: rgba(255, 140, 140, 0.55);
+  background: rgba(255, 120, 120, 0.12);
+  color: #ffb4b4;
+}
+.run-spinner {
+  animation: run-spin 0.9s linear infinite;
+  transform-origin: center;
+}
+@keyframes run-spin {
+  to { transform: rotate(360deg); }
+}
 .empty { padding: 18px 14px; text-align: center; }
 .new-workflow {
   display: flex; align-items: center; justify-content: center; gap: 8px;
