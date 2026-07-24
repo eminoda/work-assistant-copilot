@@ -1,7 +1,11 @@
 import type { CookieRecord, RecordingEvent } from '@workcopilot/browser-recorder'
 import type { RecorderMessage } from './types'
 
+const WAIT_TIMEOUT_MS = 90_000
+
 let active = false
+let paused = false
+let extractArmed = false
 let events: RecordingEvent[] = []
 let seq = 0
 let lastNavigationKey = ''
@@ -9,6 +13,8 @@ let lastHttpUrl = ''
 let activeTabId: number | undefined
 const touchedOrigins = new Set<string>()
 let cookieFlushTimer: ReturnType<typeof setTimeout> | undefined
+/** When set, the next navigation fills expectedUrl on this wait event. */
+let pendingWaitEventId: string | undefined
 
 chrome.action.onClicked.addListener(async (tab) => {
   if (tab.windowId) await chrome.sidePanel.open({ windowId: tab.windowId })
@@ -75,8 +81,29 @@ function sessionCredentialKey(url: string) {
   }
 }
 
+function persistState() {
+  void chrome.storage.session.set({
+    recordingEvents: events,
+    recordingActive: active,
+    recordingPaused: paused,
+    extractArmed,
+    activeTabId,
+  })
+}
+
+function broadcastStatus() {
+  void chrome.runtime.sendMessage({
+    type: 'recorder.status',
+    active,
+    paused,
+    extractArmed,
+    events: sortEvents(events),
+  }).catch(() => undefined)
+}
+
 function pushEvent(partial: Omit<RecordingEvent, 'id' | 'seq'> & { id?: string; seq?: number }) {
   if (!active) return
+  if (paused && partial.type !== 'waitNavigation' && partial.type !== 'extract') return
 
   if (partial.type === 'navigation' || (partial.type === 'tab' && partial.tabAction !== 'removed')) {
     const key = navigationKey(partial.url)
@@ -84,11 +111,20 @@ function pushEvent(partial: Omit<RecordingEvent, 'id' | 'seq'> & { id?: string; 
     lastNavigationKey = key
     lastHttpUrl = partial.url
     rememberOrigin(partial.url)
+
+    if (pendingWaitEventId) {
+      const wait = events.find((event) => event.id === pendingWaitEventId && event.type === 'waitNavigation')
+      if (wait && partial.url !== wait.fromUrl) {
+        wait.expectedUrl = partial.url
+        pendingWaitEventId = undefined
+        persistState()
+        broadcastStatus()
+      }
+    }
   }
 
   if (partial.type === 'cookies') {
     rememberOrigin(partial.url)
-    // Replace the previous cookies snapshot for the same host instead of stacking noise.
     const hostKey = sessionCredentialKey(partial.url)
     const index = [...events].reverse().findIndex(
       (event) => event.type === 'cookies' && event.cookieCredentialKey === hostKey,
@@ -103,7 +139,8 @@ function pushEvent(partial: Omit<RecordingEvent, 'id' | 'seq'> & { id?: string; 
     }
     if (resolvedIndex >= 0) events[resolvedIndex] = event
     else events.push(event)
-    void chrome.storage.session.set({ recordingEvents: events, recordingActive: active, activeTabId })
+    persistState()
+    broadcastStatus()
     return
   }
 
@@ -114,7 +151,8 @@ function pushEvent(partial: Omit<RecordingEvent, 'id' | 'seq'> & { id?: string; 
     timestamp: partial.timestamp || new Date().toISOString(),
   }
   events.push(event)
-  void chrome.storage.session.set({ recordingEvents: events, recordingActive: active, activeTabId })
+  persistState()
+  broadcastStatus()
 }
 
 async function snapshotCookiesForUrl(url: string) {
@@ -157,8 +195,27 @@ async function captureCurrentNavigation() {
 async function ensureContentScript(tabId: number) {
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] })
+    await chrome.tabs.sendMessage(tabId, {
+      type: 'recorder.config',
+      active,
+      paused,
+      extractArmed,
+    }).catch(() => undefined)
   } catch {
     // Restricted pages cannot be scripted.
+  }
+}
+
+async function syncContentConfig() {
+  const tabs = await chrome.tabs.query({})
+  for (const tab of tabs) {
+    if (tab.id === undefined || !isHttpUrl(tab.url)) continue
+    await chrome.tabs.sendMessage(tab.id, {
+      type: 'recorder.config',
+      active,
+      paused,
+      extractArmed,
+    }).catch(() => undefined)
   }
 }
 
@@ -167,7 +224,7 @@ async function recordTabChange(
   tabAction: 'activated' | 'created' | 'removed',
   url?: string,
 ) {
-  if (!active) return
+  if (!active || paused) return
   if (tabAction === 'removed') {
     if (!lastHttpUrl) return
     pushEvent({
@@ -195,7 +252,33 @@ async function recordTabChange(
 }
 
 chrome.webNavigation.onCommitted.addListener((details) => {
-  if (!active || details.frameId !== 0) return
+  if (!active || paused || details.frameId !== 0) return
+  if (!isHttpUrl(details.url)) return
+  pushEvent({
+    type: 'navigation',
+    url: details.url,
+    tabId: details.tabId,
+    timestamp: new Date().toISOString(),
+  })
+  scheduleCookieSnapshot(details.url)
+})
+
+/** SPA hash / fragment updates (e.g. /selfcare/#/appList) — not always in onCommitted. */
+chrome.webNavigation.onReferenceFragmentUpdated.addListener((details) => {
+  if (!active || paused || details.frameId !== 0) return
+  if (!isHttpUrl(details.url)) return
+  pushEvent({
+    type: 'navigation',
+    url: details.url,
+    tabId: details.tabId,
+    timestamp: new Date().toISOString(),
+  })
+  scheduleCookieSnapshot(details.url)
+})
+
+/** SPA history.pushState / replaceState URL updates. */
+chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+  if (!active || paused || details.frameId !== 0) return
   if (!isHttpUrl(details.url)) return
   pushEvent({
     type: 'navigation',
@@ -207,13 +290,13 @@ chrome.webNavigation.onCommitted.addListener((details) => {
 })
 
 chrome.webNavigation.onCompleted.addListener((details) => {
-  if (!active || details.frameId !== 0) return
+  if (!active || paused || details.frameId !== 0) return
   if (!isHttpUrl(details.url)) return
   scheduleCookieSnapshot(details.url)
 })
 
 chrome.cookies.onChanged.addListener((changeInfo) => {
-  if (!active || changeInfo.removed) return
+  if (!active || paused || changeInfo.removed) return
   const domain = changeInfo.cookie.domain.replace(/^\./, '')
   const scheme = changeInfo.cookie.secure ? 'https' : 'http'
   scheduleCookieSnapshot(`${scheme}://${domain}${changeInfo.cookie.path || '/'}`)
@@ -233,7 +316,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 })
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!active) return
+  if (!active || paused) return
   if (changeInfo.status === 'complete' && tab.active && isHttpUrl(tab.url)) {
     void ensureContentScript(tabId)
     scheduleCookieSnapshot(tab.url)
@@ -244,20 +327,25 @@ chrome.runtime.onMessage.addListener((message: RecorderMessage, sender, sendResp
   if (message.type === 'recorder.start') {
     void (async () => {
       active = true
+      paused = false
+      extractArmed = false
+      pendingWaitEventId = undefined
       events = []
       seq = 0
       lastNavigationKey = ''
       lastHttpUrl = ''
       activeTabId = undefined
       touchedOrigins.clear()
-      await chrome.storage.session.set({ recordingActive: true, recordingEvents: [] })
+      persistState()
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
       if (tab?.id) {
         activeTabId = tab.id
         await ensureContentScript(tab.id)
       }
       await captureCurrentNavigation()
-      sendResponse({ active, events: sortEvents(events) })
+      const payload = { active, paused, extractArmed, events: sortEvents(events) }
+      sendResponse(payload)
+      broadcastStatus()
     })()
     return true
   }
@@ -267,15 +355,99 @@ chrome.runtime.onMessage.addListener((message: RecorderMessage, sender, sendResp
       if (cookieFlushTimer) clearTimeout(cookieFlushTimer)
       await snapshotTouchedOrigins()
       active = false
-      void chrome.storage.session.set({ recordingActive: false })
+      paused = false
+      extractArmed = false
+      pendingWaitEventId = undefined
+      persistState()
+      await syncContentConfig()
       const ordered = sortEvents(events)
       events = ordered
-      sendResponse({ active, events: ordered })
+      sendResponse({ active, paused, extractArmed, events: ordered })
+      broadcastStatus()
     })()
     return true
   }
 
+  if (message.type === 'recorder.pause') {
+    paused = true
+    persistState()
+    void syncContentConfig()
+    sendResponse({ active, paused, extractArmed, events: sortEvents(events) })
+    broadcastStatus()
+    return false
+  }
+
+  if (message.type === 'recorder.resume') {
+    paused = false
+    persistState()
+    void syncContentConfig()
+    sendResponse({ active, paused, extractArmed, events: sortEvents(events) })
+    broadcastStatus()
+    return false
+  }
+
+  if (message.type === 'recorder.waitNavigation') {
+    void (async () => {
+      if (!active) {
+        sendResponse({ active, paused, extractArmed, events: sortEvents(events) })
+        return
+      }
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+      const url = (isHttpUrl(tab?.url) ? tab.url : lastHttpUrl) || 'https://example.invalid/'
+      const id = crypto.randomUUID()
+      pendingWaitEventId = id
+      pushEvent({
+        id,
+        type: 'waitNavigation',
+        url,
+        fromUrl: url,
+        waitTimeoutMs: WAIT_TIMEOUT_MS,
+        timestamp: new Date().toISOString(),
+        ...(tab?.id !== undefined ? { tabId: tab.id } : {}),
+      })
+      sendResponse({ active, paused, extractArmed, events: sortEvents(events) })
+    })()
+    return true
+  }
+
+  if (message.type === 'recorder.armExtract') {
+    extractArmed = message.armed
+    persistState()
+    void syncContentConfig()
+    sendResponse({ active, paused, extractArmed, events: sortEvents(events) })
+    broadcastStatus()
+    return false
+  }
+
+  if (message.type === 'recorder.confirmExtract') {
+    pushEvent({
+      type: 'extract',
+      url: message.url,
+      timestamp: new Date().toISOString(),
+      extractLabel: message.label,
+      extractText: message.text,
+      value: message.text,
+    })
+    extractArmed = false
+    persistState()
+    void syncContentConfig()
+    sendResponse({ active, paused, extractArmed, events: sortEvents(events) })
+    return false
+  }
+
   if (message.type === 'recorder.event') {
+    if (message.event.type === 'extract' && !message.event.extractLabel) {
+      // Forward unnamed extract to side panel for naming.
+      void chrome.runtime.sendMessage({
+        type: 'recorder.extractPending',
+        text: message.event.extractText || message.event.value || '',
+        url: message.event.url,
+      }).catch(() => undefined)
+      extractArmed = false
+      persistState()
+      void syncContentConfig()
+      return false
+    }
     const { seq: _ignored, ...rest } = message.event
     pushEvent({
       ...rest,
@@ -286,7 +458,7 @@ chrome.runtime.onMessage.addListener((message: RecorderMessage, sender, sendResp
   }
 
   if (message.type === 'recorder.status') {
-    sendResponse({ active, events: sortEvents(events) })
+    sendResponse({ active, paused, extractArmed, events: sortEvents(events) })
     return false
   }
 

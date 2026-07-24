@@ -1,18 +1,89 @@
 <script setup lang="ts">
-import { shallowRef } from 'vue'
+import { computed, onMounted, onUnmounted, shallowRef } from 'vue'
 import type { RecordingEvent } from '@workcopilot/browser-recorder'
-import RuntimeConnection from './components/RuntimeConnection.vue'
-import RecorderPanel from './components/RecorderPanel.vue'
+import StatusTags from './components/StatusTags.vue'
+import ActionDock from './components/ActionDock.vue'
 import WorkflowList from './components/WorkflowList.vue'
-import CredentialPrompt from './components/CredentialPrompt.vue'
+import RenameWorkflowPrompt from './components/RenameWorkflowPrompt.vue'
+import SettingsView from './components/SettingsView.vue'
+import ComingSoonView from './components/ComingSoonView.vue'
+import RecordingView from './components/RecordingView.vue'
+import WorkflowDetailView from './components/WorkflowDetailView.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
 import { useRuntime } from './composables/useRuntime'
+import type { RecorderState } from './types'
+import type { WorkflowSummary } from './workflowTypes'
 
+const view = shallowRef<'home' | 'settings' | 'notify' | 'chat' | 'record' | 'detail'>('home')
 const active = shallowRef(false)
+const paused = shallowRef(false)
+const extractArmed = shallowRef(false)
 const events = shallowRef<RecordingEvent[]>([])
 const pendingEvents = shallowRef<RecordingEvent[] | null>(null)
+const pendingName = shallowRef('')
+const pendingKind = shallowRef<'login' | 'app'>('app')
+const naming = shallowRef(false)
+const saveError = shallowRef('')
+const saving = shallowRef(false)
 const credentialKeys = shallowRef<string[]>([])
 const message = shallowRef('')
+const elapsedMs = shallowRef(0)
+const detailWorkflow = shallowRef<WorkflowSummary | null>(null)
+const detailLoading = shallowRef(false)
+const detailError = shallowRef('')
+const detailDeleteId = shallowRef<string | null>(null)
 const runtime = useRuntime()
+
+let timerStartedAt = 0
+let elapsedOffset = 0
+let timerId: ReturnType<typeof setInterval> | undefined
+
+const connected = computed(() => {
+  const status = runtime.status.value.toLowerCase()
+  return status.includes('connect') || status === 'ready' || status === 'ok'
+})
+
+function applyState(state: RecorderState) {
+  active.value = state.active
+  paused.value = state.paused
+  extractArmed.value = state.extractArmed
+  events.value = state.events
+}
+
+function stopTimer() {
+  if (timerId) clearInterval(timerId)
+  timerId = undefined
+}
+
+function tickTimer() {
+  if (!active.value || paused.value) return
+  elapsedMs.value = elapsedOffset + (Date.now() - timerStartedAt)
+}
+
+function startTimer(reset = true) {
+  stopTimer()
+  if (reset) {
+    elapsedOffset = 0
+    elapsedMs.value = 0
+  }
+  timerStartedAt = Date.now()
+  timerId = setInterval(tickTimer, 250)
+}
+
+function pauseTimer() {
+  tickTimer()
+  elapsedOffset = elapsedMs.value
+  stopTimer()
+}
+
+function resumeTimer() {
+  timerStartedAt = Date.now()
+  timerId = setInterval(tickTimer, 250)
+}
+
+function defaultWorkflowName() {
+  return `Recording ${new Date().toLocaleString()}`
+}
 
 function credentialKeysFrom(list: RecordingEvent[]) {
   return [...new Set(list.map((event) => event.credentialKey).filter((key): key is string => Boolean(key)))]
@@ -29,77 +100,344 @@ async function storeSessionCookies(list: RecordingEvent[]) {
   return Promise.all(next)
 }
 
-async function start() {
-  const state = await chrome.runtime.sendMessage({ type: 'recorder.start' })
-  active.value = state.active
-  events.value = state.events
+function resetPending() {
   pendingEvents.value = null
+  pendingName.value = ''
+  pendingKind.value = 'app'
+  naming.value = false
+  saveError.value = ''
+  saving.value = false
   credentialKeys.value = []
+}
+
+async function openRecording() {
+  if (view.value === 'record' && active.value) return
+  active.value = false
+  paused.value = false
+  extractArmed.value = false
+  events.value = []
+  stopTimer()
+  elapsedMs.value = 0
+  resetPending()
   message.value = ''
+  view.value = 'record'
 }
 
-async function persist(list: RecordingEvent[]) {
+async function startRecording() {
+  if (active.value) return
+  const state = await chrome.runtime.sendMessage({ type: 'recorder.start' }) as RecorderState
+  applyState(state)
+  startTimer(true)
+  message.value = '正在录制…'
+}
+
+async function persist(list: RecordingEvent[], name: string, kind: 'login' | 'app') {
   const sanitized = await storeSessionCookies(list)
-  await runtime.saveRecording(`Recording ${new Date().toLocaleString()}`, sanitized)
+  await runtime.saveRecording(name, sanitized, kind)
   events.value = sanitized
-  pendingEvents.value = null
-  credentialKeys.value = []
-  message.value = 'Workflow saved (session cookies stored locally)'
+  resetPending()
+  message.value = `已保存：${name}（${kind === 'login' ? '登录' : '应用'}）`
+  view.value = 'home'
 }
 
-async function stop() {
-  const state = await chrome.runtime.sendMessage({ type: 'recorder.stop' })
-  active.value = state.active
-  events.value = state.events
-  if (!state.events.length) return
-
-  const keys = credentialKeysFrom(state.events)
-  if (keys.length) {
-    pendingEvents.value = state.events
-    credentialKeys.value = keys
-    message.value = 'Enter passwords to finish saving'
+async function finishRecording() {
+  if (!active.value) {
+    message.value = '尚未开始录制'
     return
   }
-  await persist(state.events)
-}
-
-async function saveCredentials(values: Record<string, string>) {
-  for (const [key, value] of Object.entries(values)) {
-    await runtime.saveCredential(key, value)
+  const state = await chrome.runtime.sendMessage({ type: 'recorder.stop' }) as RecorderState
+  applyState(state)
+  stopTimer()
+  if (!state.events.length) {
+    message.value = '没有可保存的操作'
+    view.value = 'home'
+    return
   }
-  if (pendingEvents.value?.length) await persist(pendingEvents.value)
-  message.value = 'Credentials saved and workflow stored'
+  pendingEvents.value = state.events
+  pendingName.value = defaultWorkflowName()
+  credentialKeys.value = credentialKeysFrom(state.events)
+  naming.value = true
 }
 
-async function skipCredentials() {
-  if (pendingEvents.value?.length) await persist(pendingEvents.value)
-  message.value = 'Workflow saved without passwords — replay will fail until credentials are set'
+async function cancelRecording() {
+  if (active.value) {
+    await chrome.runtime.sendMessage({ type: 'recorder.stop' })
+  }
+  active.value = false
+  paused.value = false
+  extractArmed.value = false
+  events.value = []
+  stopTimer()
+  elapsedMs.value = 0
+  resetPending()
+  message.value = '已取消录制'
+  view.value = 'home'
+}
+
+async function pauseRecording() {
+  const state = await chrome.runtime.sendMessage({ type: 'recorder.pause' }) as RecorderState
+  applyState(state)
+  pauseTimer()
+}
+
+async function resumeRecording() {
+  const state = await chrome.runtime.sendMessage({ type: 'recorder.resume' }) as RecorderState
+  applyState(state)
+  resumeTimer()
+}
+
+async function insertWait() {
+  if (!active.value) {
+    message.value = '请先开始录制'
+    return
+  }
+  const state = await chrome.runtime.sendMessage({ type: 'recorder.waitNavigation' }) as RecorderState
+  applyState(state)
+  message.value = '已插入等待跳转（90s），完成二维码/短信后页面跳转即可'
+}
+
+async function toggleExtractArm() {
+  if (!active.value) {
+    message.value = '请先开始录制'
+    return
+  }
+  const state = await chrome.runtime.sendMessage({
+    type: 'recorder.armExtract',
+    armed: !extractArmed.value,
+  }) as RecorderState
+  applyState(state)
+  message.value = state.extractArmed ? '请在页面上拖选要提取的文字' : ''
+}
+
+async function acceptSave(payload: {
+  name: string
+  kind: 'login' | 'app'
+  credentials: Record<string, string>
+}) {
+  const list = pendingEvents.value
+  if (!list?.length) {
+    resetPending()
+    view.value = 'home'
+    return
+  }
+  saveError.value = ''
+  saving.value = true
+  try {
+    for (const [key, value] of Object.entries(payload.credentials)) {
+      await runtime.saveCredential(key, value)
+    }
+    await persist(list, payload.name, payload.kind)
+  } catch (error) {
+    saveError.value = error instanceof Error ? error.message : '保存失败'
+  } finally {
+    saving.value = false
+  }
+}
+
+function discardNaming() {
+  resetPending()
+  events.value = []
+  message.value = '已丢弃本次录制'
+  view.value = 'home'
 }
 
 async function execute(id: string) {
   const result = await runtime.execute(id)
-  message.value = `Execution queued: ${result.executionId}`
+  message.value = `已排队执行：${result.executionId}`
+  if (view.value === 'detail') view.value = 'home'
 }
+
+async function openWorkflowDetail(id: string) {
+  detailLoading.value = true
+  detailError.value = ''
+  detailWorkflow.value = null
+  view.value = 'detail'
+  try {
+    detailWorkflow.value = await runtime.getWorkflow(id)
+  } catch (error) {
+    detailError.value = error instanceof Error ? error.message : '加载失败'
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+async function removeWorkflow(id: string) {
+  await runtime.deleteWorkflow(id)
+  message.value = '工作流已删除'
+  detailWorkflow.value = null
+  detailDeleteId.value = null
+  if (view.value === 'detail') view.value = 'home'
+}
+
+function askRemoveFromDetail(id: string) {
+  detailDeleteId.value = id
+}
+
+async function confirmRemoveFromDetail() {
+  const id = detailDeleteId.value
+  if (!id) return
+  await removeWorkflow(id)
+}
+
+async function removeAllWorkflows() {
+  if (!runtime.workflows.value.length) return
+  await runtime.deleteAllWorkflows()
+  message.value = '已删除全部工作流'
+}
+
+async function connectFromSettings(token: string) {
+  await runtime.connect(token)
+  message.value = '已连接本地 Runtime'
+  view.value = 'home'
+}
+
+function leaveSecondary() {
+  if (active.value) {
+    void cancelRecording()
+    return
+  }
+  detailWorkflow.value = null
+  detailError.value = ''
+  detailDeleteId.value = null
+  view.value = 'home'
+}
+
+function onRuntimeMessage(message: RecorderState & { type?: string }) {
+  if (message.type === 'recorder.status' && Array.isArray(message.events)) {
+    applyState({
+      active: message.active,
+      paused: message.paused,
+      extractArmed: message.extractArmed,
+      events: message.events,
+    })
+  }
+}
+
+onMounted(() => {
+  chrome.runtime.onMessage.addListener(onRuntimeMessage)
+})
+
+onUnmounted(() => {
+  chrome.runtime.onMessage.removeListener(onRuntimeMessage)
+  stopTimer()
+})
 </script>
 
 <template>
-  <main class="shell">
-    <header>
-      <div class="mark">W</div>
-      <div>
-        <h1>WorkCopilot</h1>
-        <p>Local AI worker runtime</p>
+  <main class="shell" :data-view="view">
+    <header v-if="view === 'home' || view === 'settings'">
+      <div class="brand">
+        <div class="mark">W</div>
+        <div>
+          <h1>Work Copilot</h1>
+        </div>
       </div>
+      <button
+        v-if="view === 'home'"
+        class="icon-btn"
+        type="button"
+        aria-label="设置"
+        title="设置"
+        @click="view = 'settings'"
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path
+            fill="currentColor"
+            d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.2 7.2 0 0 0-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.48.41l-.36 2.54c-.57.22-1.11.52-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.49.49 0 0 0 .12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.86 14.5a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.42 1.05.76 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.57-.22 1.11-.52 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 0 0-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"
+          />
+        </svg>
+      </button>
     </header>
-    <RuntimeConnection :status="runtime.status.value" @connect="runtime.connect" />
-    <RecorderPanel :active="active" :count="events.length" @start="start" @stop="stop" />
-    <CredentialPrompt
-      v-if="credentialKeys.length"
-      :keys="credentialKeys"
-      @save="saveCredentials"
-      @skip="skipCredentials"
+
+    <SettingsView
+      v-if="view === 'settings'"
+      :status="runtime.status.value"
+      :initial-token="runtime.token.value"
+      :connect="connectFromSettings"
+      @back="view = 'home'"
     />
-    <WorkflowList :workflows="[...runtime.workflows.value]" @execute="execute" />
-    <p v-if="message" class="notice">{{ message }}</p>
+
+    <ComingSoonView
+      v-else-if="view === 'notify'"
+      title="通知"
+      description="消息通知与定时策略即将上线，敬请期待。"
+      @back="leaveSecondary"
+      @close="leaveSecondary"
+    />
+
+    <ComingSoonView
+      v-else-if="view === 'chat'"
+      title="AI 聊天"
+      description="与本地 AI Runtime 对话即将上线，敬请期待。"
+      @back="leaveSecondary"
+      @close="leaveSecondary"
+    />
+
+    <template v-else-if="view === 'detail'">
+      <WorkflowDetailView
+        v-if="detailWorkflow || detailLoading || detailError"
+        :workflow="detailWorkflow || { id: '', name: '…', intent: '' }"
+        :loading="detailLoading"
+        :error="detailError"
+        @back="leaveSecondary"
+        @close="leaveSecondary"
+        @execute="execute"
+        @remove="askRemoveFromDetail"
+      />
+      <ConfirmDialog
+        v-if="detailDeleteId && detailWorkflow"
+        title="删除工作流"
+        :message="`确定删除「${detailWorkflow.name}」？此操作不可恢复。`"
+        @cancel="detailDeleteId = null"
+        @confirm="confirmRemoveFromDetail"
+      />
+    </template>
+
+    <template v-else-if="view === 'record'">
+      <RecordingView
+        :active="active"
+        :events="events"
+        :paused="paused"
+        :extract-armed="extractArmed"
+        :elapsed-ms="elapsedMs"
+        @back="leaveSecondary"
+        @close="leaveSecondary"
+        @start="startRecording"
+        @pause="pauseRecording"
+        @resume="resumeRecording"
+        @wait="insertWait"
+        @arm-extract="toggleExtractArm"
+        @cancel="cancelRecording"
+        @complete="finishRecording"
+      />
+      <RenameWorkflowPrompt
+        v-if="naming"
+        :default-name="pendingName"
+        :credential-keys="credentialKeys"
+        :error="saveError"
+        :saving="saving"
+        @save="acceptSave"
+        @cancel="discardNaming"
+      />
+    </template>
+
+    <template v-else>
+      <StatusTags :connected="connected" :recording="active" />
+      <ActionDock
+        :recording="active"
+        @record="openRecording"
+        @notify="view = 'notify'"
+        @chat="view = 'chat'"
+      />
+      <WorkflowList
+        :workflows="[...runtime.workflows.value]"
+        @execute="execute"
+        @remove="removeWorkflow"
+        @remove-all="removeAllWorkflows"
+        @create="openRecording"
+        @open="openWorkflowDetail"
+      />
+      <p v-if="message" class="notice">{{ message }}</p>
+    </template>
   </main>
 </template>

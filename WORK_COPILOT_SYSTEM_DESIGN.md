@@ -1,5 +1,9 @@
 # WorkCopilot System Design
 
+> **已归档（历史稿）**  
+> 现行产品愿景、架构与功能设计请以 [`docs/`](./docs/README.md) 为准。  
+> 本文保留工程约束与早期 Phase 规划供对照，**实现优先级与产品叙述以 docs 覆盖为准**。
+
 ## AI Worker Assistant Runtime
 
 Repository:

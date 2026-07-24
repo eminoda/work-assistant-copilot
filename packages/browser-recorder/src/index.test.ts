@@ -34,7 +34,7 @@ describe('recordingToWorkflow', () => {
 
   it('maps cookie snapshots to browser.setCookies', () => {
     const workflow = recordingToWorkflow({
-      id: 'r4', name: 'Session', intent: 'browser.workflow',
+      id: 'r4', name: 'Session', intent: 'browser.workflow', kind: 'app',
       events: [
         {
           id: 'e1', type: 'navigation', url: 'https://go.sheca.com/selfcare/',
@@ -49,5 +49,73 @@ describe('recordingToWorkflow', () => {
     })
     expect(workflow.steps.map((step) => step.tool)).toEqual(['browser.open', 'browser.setCookies'])
     expect(workflow.steps[1]?.params.credentialKey).toBe('go.sheca.com.session')
+  })
+
+  it('login workflows keep hash homeUrl and drop trailing open(home)', () => {
+    const workflow = recordingToWorkflow({
+      id: 'r7', name: 'Portal login', intent: 'browser.login', kind: 'login',
+      events: [
+        {
+          id: 'e1', type: 'navigation', url: 'https://example.test/login',
+          timestamp: new Date().toISOString(), seq: 1,
+        },
+        {
+          id: 'e2', type: 'click', url: 'https://example.test/login',
+          timestamp: new Date().toISOString(), seq: 2,
+          element: {
+            tag: 'button',
+            attributes: {},
+            selector: { text: '登录', css: 'div.login-btn', confidence: 0.9 },
+          },
+        },
+        {
+          id: 'e3', type: 'navigation', url: 'https://example.test/selfcare/#/appList',
+          timestamp: new Date().toISOString(), seq: 3,
+        },
+        {
+          id: 'e4', type: 'cookies', url: 'https://example.test/selfcare/#/appList',
+          timestamp: new Date().toISOString(), seq: 4,
+          cookieCredentialKey: 'example.test.session',
+        },
+      ],
+    })
+    expect(workflow.kind).toBe('login')
+    expect(workflow.homeUrl).toBe('https://example.test/selfcare/#/appList')
+    expect(workflow.steps.map((step) => step.tool)).toEqual([
+      'browser.setCookies',
+      'browser.open',
+      'browser.click',
+    ])
+    expect(workflow.steps.at(-1)?.tool).toBe('browser.click')
+  })
+
+  it('maps waitNavigation to browser.waitNavigation and skips extract', () => {
+    const workflow = recordingToWorkflow({
+      id: 'r5', name: 'QR', intent: 'browser.workflow',
+      events: [
+        {
+          id: 'e1', type: 'navigation', url: 'https://example.test/login',
+          timestamp: new Date().toISOString(), seq: 1,
+        },
+        {
+          id: 'e2', type: 'waitNavigation', url: 'https://example.test/login',
+          fromUrl: 'https://example.test/login',
+          expectedUrl: 'https://example.test/home',
+          waitTimeoutMs: 90_000,
+          timestamp: new Date().toISOString(), seq: 2,
+        },
+        {
+          id: 'e3', type: 'extract', url: 'https://example.test/home',
+          extractLabel: 'title', extractText: 'Hello',
+          timestamp: new Date().toISOString(), seq: 3,
+        },
+      ],
+    })
+    expect(workflow.steps.map((step) => step.tool)).toEqual(['browser.open', 'browser.waitNavigation'])
+    expect(workflow.steps[1]?.params).toMatchObject({
+      fromUrl: 'https://example.test/login',
+      expectedUrl: 'https://example.test/home',
+      timeoutMs: 90_000,
+    })
   })
 })

@@ -2,6 +2,17 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { ToolRegistry, type AgentEvent, type ToolContext } from '@workcopilot/tool-registry'
 
+export const selectorScopeSchema = z.object({
+  tag: z.string().optional(),
+  ariaLabel: z.string().optional(),
+  role: z.string().optional(),
+  text: z.string().optional(),
+  placeholder: z.string().optional(),
+  stableAttribute: z.object({ name: z.string(), value: z.string() }).optional(),
+  css: z.string().optional(),
+})
+export type SelectorScope = z.infer<typeof selectorScopeSchema>
+
 export const selectorSchema = z.object({
   ariaLabel: z.string().optional(),
   role: z.string().optional(),
@@ -9,6 +20,8 @@ export const selectorSchema = z.object({
   placeholder: z.string().optional(),
   stableAttribute: z.object({ name: z.string(), value: z.string() }).optional(),
   css: z.string().optional(),
+  /** Nearest useful ancestors first (max 2). Used to scope ambiguous text/role matches. */
+  parents: z.array(selectorScopeSchema).max(2).optional(),
   confidence: z.number().min(0).max(1).default(0.5),
 })
 export type ElementSelector = z.infer<typeof selectorSchema>
@@ -24,15 +37,24 @@ export const workflowStepSchema = z.object({
 })
 export type WorkflowStep = z.infer<typeof workflowStepSchema>
 
+export const workflowKindSchema = z.enum(['login', 'app'])
+export type WorkflowKind = z.infer<typeof workflowKindSchema>
+
 export const workflowSchema = z.object({
   id: z.string().optional(),
   name: z.string().min(1),
   intent: z.string().min(1),
   description: z.string().default(''),
   version: z.literal(1).default(1),
+  kind: workflowKindSchema.default('app'),
+  /** For login workflows: last captured URL used as session home / fast-path entry. */
+  homeUrl: z.string().url().optional(),
+  createdAt: z.string().datetime().optional(),
+  updatedAt: z.string().datetime().optional(),
   steps: z.array(workflowStepSchema).min(1),
 })
 export type Workflow = z.infer<typeof workflowSchema>
+
 
 export const executionStatusSchema = z.enum(['PENDING', 'RUNNING', 'WAITING_CONFIRMATION', 'SUCCESS', 'FAILED', 'CANCELLED'])
 export type ExecutionStatus = z.infer<typeof executionStatusSchema>
@@ -64,7 +86,7 @@ export class WorkflowEngine {
   ) {}
 
   async execute(
-    input: Workflow,
+    input: z.input<typeof workflowSchema>,
     onEvent: (event: AgentEvent) => void = () => {},
     signal?: AbortSignal,
     executionId = randomUUID(),

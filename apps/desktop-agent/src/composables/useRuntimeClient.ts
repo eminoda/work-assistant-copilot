@@ -49,11 +49,33 @@ export function useRuntimeClient() {
     connected.value = true
   }
 
+  /** On launch: if a token is saved, connect (retry while runtime is still booting). */
+  async function autoConnect(retries = 12, delayMs = 500) {
+    const saved = token.value.trim()
+    if (!saved) return
+
+    let lastError: unknown
+    for (let attempt = 0; attempt < retries; attempt += 1) {
+      try {
+        await connect(saved)
+        return
+      } catch (error) {
+        lastError = error
+        connected.value = false
+        if (attempt < retries - 1) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs))
+        }
+      }
+    }
+    console.warn('[desktop] auto-connect failed', lastError)
+  }
+
   return {
     token: readonly(token),
     connected: readonly(connected),
     loading: readonly(loading),
     request,
     connect,
+    autoConnect,
   }
 }

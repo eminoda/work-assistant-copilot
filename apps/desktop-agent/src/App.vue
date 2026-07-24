@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { shallowRef } from 'vue'
+import { onMounted, shallowRef } from 'vue'
 import AppSidebar from './components/AppSidebar.vue'
 import DashboardView from './components/DashboardView.vue'
 import DataListView from './components/DataListView.vue'
@@ -10,6 +10,10 @@ const active = shallowRef('Dashboard')
 const runtime = useRuntimeClient()
 window.__workcopilotRequest = runtime.request
 const endpoints: Record<string, string> = { Workflows: '/api/workflows', Memory: '/api/memories', Projects: '/api/projects' }
+
+onMounted(() => {
+  void runtime.autoConnect()
+})
 </script>
 <template>
   <div class="app-shell">

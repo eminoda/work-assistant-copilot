@@ -1,13 +1,57 @@
 import { z } from 'zod'
-import { chromium, type Browser, type Page } from 'playwright'
+import { chromium, type Browser, type Locator, type Page } from 'playwright'
 import { ToolRegistry } from '@workcopilot/tool-registry'
-import { selectorSchema, type ElementSelector } from '@workcopilot/workflow-engine'
+import { selectorSchema, type ElementSelector, type SelectorScope } from '@workcopilot/workflow-engine'
 
-const successSchema = z.object({ success: z.boolean(), url: z.string().optional(), value: z.unknown().optional() })
+const successSchema = z.object({
+  success: z.boolean(),
+  url: z.string().optional(),
+  value: z.unknown().optional(),
+  skipped: z.boolean().optional(),
+})
 
 function isClosedTargetError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
   return /has been closed|Target page, context or browser has been closed|Browser has been closed/i.test(message)
+}
+
+function selectorBlob(target: ElementSelector) {
+  return [target.css, target.text, target.ariaLabel, target.placeholder, target.role]
+    .filter((part): part is string => Boolean(part))
+    .join(' ')
+}
+
+function looksLikeBackNav(target: ElementSelector) {
+  return /back|返回/i.test(selectorBlob(target))
+}
+
+function looksLikeLoginSubmit(target: ElementSelector) {
+  return /login-btn|sign[\s-]?in|登\s*录|登陆|submit/i.test(selectorBlob(target))
+}
+
+/**
+ * Skip navigation when already on the target document.
+ * - same origin + pathname (trailing slash ignored)
+ * - empty / `#` / `#/` hash is compatible with any hash on that path
+ *   e.g. already at .../selfcare/#/appList, next open .../selfcare/ → skip
+ */
+export function shouldSkipNavigation(currentUrl: string, targetUrl: string): boolean {
+  try {
+    const current = new URL(currentUrl)
+    const target = new URL(targetUrl)
+    if (current.origin !== target.origin) return false
+
+    const pathOf = (url: URL) => url.pathname.replace(/\/+$/, '') || '/'
+    if (pathOf(current) !== pathOf(target)) return false
+
+    const normalizeHash = (hash: string) => (!hash || hash === '#' || hash === '#/' ? '' : hash)
+    const currentHash = normalizeHash(current.hash)
+    const targetHash = normalizeHash(target.hash)
+    if (!targetHash || !currentHash) return true
+    return currentHash === targetHash
+  } catch {
+    return currentUrl === targetUrl
+  }
 }
 
 export class PlaywrightRuntime {
@@ -61,16 +105,41 @@ export class PlaywrightRuntime {
   }
 
   locator(page: Page, target: ElementSelector) {
+    const { parents, ...self } = target
+    let scope: Page | Locator = page
+    if (parents?.length) {
+      for (const parent of [...parents].reverse()) {
+        scope = this.locateIn(scope, parent)
+      }
+    }
+    return this.locateIn(scope, self)
+  }
+
+  /** Prefer a single visible match when selectors hit mobile+desktop duplicates. */
+  async visibleLocator(page: Page, target: ElementSelector): Promise<Locator> {
+    const base = this.locator(page, target)
+    const visible = base.filter({ visible: true })
+    const visibleCount = await visible.count().catch(() => 0)
+    if (visibleCount === 1) return visible
+    if (visibleCount > 1) {
+      console.warn(`[playwright:locator] ${visibleCount} visible matches — using first visible`)
+      return visible.first()
+    }
+    return base.first()
+  }
+
+  locateIn(scope: Page | Locator, target: SelectorScope | Omit<ElementSelector, 'parents' | 'confidence'>) {
     // Prefer durable attributes over ephemeral copy (placeholders / marketing text).
     if (target.stableAttribute) {
       const { name, value } = target.stableAttribute
-      return page.locator(`[${name}=${JSON.stringify(value)}]`)
+      return scope.locator(`[${name}=${JSON.stringify(value)}]`)
     }
-    if (target.ariaLabel) return page.getByLabel(target.ariaLabel)
-    if (target.placeholder) return page.getByPlaceholder(target.placeholder)
-    if (target.role) return page.getByRole(target.role as never, target.text ? { name: target.text } : {})
-    if (target.text) return page.getByText(target.text, { exact: true })
-    if (target.css) return page.locator(target.css)
+    if (target.css) return scope.locator(target.css)
+    if (target.ariaLabel) return scope.getByLabel(target.ariaLabel)
+    if (target.placeholder) return scope.getByPlaceholder(target.placeholder)
+    if (target.role) return scope.getByRole(target.role as never, target.text ? { name: target.text } : {})
+    if (target.text) return scope.getByText(target.text, { exact: true })
+    if ('tag' in target && target.tag) return scope.locator(target.tag)
     throw new Error('No usable selector')
   }
 
@@ -130,9 +199,45 @@ export function registerBrowserTools(
     name: 'browser.open', description: 'Open a URL in the automation browser',
     inputSchema: z.object({ url: z.string().url() }), outputSchema: successSchema,
     execute: async ({ url }) => runtime.withPage(async (page) => {
+      const current = page.url()
+      if (shouldSkipNavigation(current, url)) {
+        console.log(`[playwright:open] skip — already at ${current}, next also ${url}`)
+        return { success: true, url: current, skipped: true }
+      }
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
       await runtime.waitForPageReady(page, 'after browser.open')
       await runtime.logCookies('after browser.open', page)
+      return { success: true, url: page.url() }
+    }),
+  })
+  registry.register({
+    name: 'browser.waitNavigation',
+    description: 'Wait for a URL change after human steps (QR / SMS). Default timeout 90s.',
+    inputSchema: z.object({
+      fromUrl: z.string().url(),
+      expectedUrl: z.string().url().optional(),
+      timeoutMs: z.number().int().positive().default(90_000),
+    }),
+    outputSchema: successSchema,
+    execute: async ({ fromUrl, expectedUrl, timeoutMs }) => runtime.withPage(async (page) => {
+      const deadline = Date.now() + timeoutMs
+      const matches = (current: string) => {
+        if (expectedUrl) {
+          try {
+            return new URL(current).href === new URL(expectedUrl).href || current.startsWith(expectedUrl)
+          } catch {
+            return current === expectedUrl || current.includes(expectedUrl)
+          }
+        }
+        return current !== fromUrl
+      }
+      if (matches(page.url())) {
+        await runtime.waitForPageReady(page, 'after browser.waitNavigation')
+        return { success: true, url: page.url() }
+      }
+      await page.waitForURL((url) => matches(url.toString()), { timeout: Math.max(1_000, deadline - Date.now()) })
+      await runtime.waitForPageReady(page, 'after browser.waitNavigation')
+      await runtime.logCookies('after browser.waitNavigation', page)
       return { success: true, url: page.url() }
     }),
   })
@@ -202,15 +307,40 @@ export function registerBrowserTools(
     name: 'browser.click', description: 'Click an element using a resilient selector',
     inputSchema: z.object({ target: selectorSchema }), outputSchema: successSchema,
     execute: async ({ target }) => runtime.withPage(async (page) => {
-      const locator = runtime.locator(page, target)
+      // Opening action=enterprise often already shows the form; recorded「返回」would leave it.
+      if (looksLikeBackNav(target)) {
+        const userVisible = await page.getByPlaceholder(/用户名|账号|邮箱|手机号|username|account/i).first()
+          .isVisible().catch(() => false)
+        const passVisible = await page.getByPlaceholder(/密码|password/i).first()
+          .isVisible().catch(() => false)
+        if (userVisible && passVisible) {
+          console.log('[playwright:click] skip back — username/password fields already visible')
+          return { success: true, url: page.url(), skipped: true }
+        }
+      }
+
+      const locator = await runtime.visibleLocator(page, target)
       await locator.waitFor({ state: 'visible', timeout: 15_000 })
+      const beforeUrl = page.url()
       await Promise.all([
-        // Click may navigate or only fire XHR; both should settle before next step.
         page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => undefined),
         locator.click(),
       ])
       await runtime.waitForPageReady(page, 'after browser.click')
       await runtime.logCookies('after browser.click', page)
+
+      if (looksLikeLoginSubmit(target)) {
+        try {
+          await page.waitForURL((url) => !/\/login(\/|$|\?|#)/i.test(url.href), { timeout: 25_000 })
+          await runtime.waitForPageReady(page, 'after login navigation')
+          await runtime.logCookies('after login navigation', page)
+        } catch {
+          throw new Error(
+            `登录点击后仍停留在登录页（${page.url()}，点击前 ${beforeUrl}）。请检查账号密码，或页面是否有验证码/协议勾选。`,
+          )
+        }
+      }
+
       return { success: true, url: page.url() }
     }),
   })
@@ -233,9 +363,36 @@ export function registerBrowserTools(
       }
       const secret = resolved
       return runtime.withPage(async (page) => {
-        const locator = runtime.locator(page, target)
+        const locator = await runtime.visibleLocator(page, target)
         await locator.waitFor({ state: 'visible', timeout: 15_000 })
+        await locator.click({ timeout: 5_000 }).catch(() => undefined)
+        await locator.fill('')
         await locator.fill(secret)
+        // Vue / React controlled inputs often need native setter + input events.
+        await locator.evaluate((element, next) => {
+          const el = element as HTMLInputElement | HTMLTextAreaElement
+          const proto = Object.getOwnPropertyDescriptor(
+            el instanceof HTMLTextAreaElement
+              ? window.HTMLTextAreaElement.prototype
+              : window.HTMLInputElement.prototype,
+            'value',
+          )
+          proto?.set?.call(el, next)
+          el.dispatchEvent(new Event('input', { bubbles: true }))
+          el.dispatchEvent(new Event('change', { bubbles: true }))
+        }, secret)
+        let current = await locator.inputValue().catch(() => '')
+        if (current !== secret) {
+          await locator.fill('')
+          await locator.pressSequentially(secret, { delay: 25 })
+          current = await locator.inputValue().catch(() => '')
+        }
+        console.log(
+          `[playwright:input] credentialKey=${credentialKey ?? '(plain)'} len=${secret.length} matched=${current === secret}`,
+        )
+        if (current !== secret) {
+          throw new Error(`Failed to fill input (value did not stick${credentialKey ? `; key=${credentialKey}` : ''})`)
+        }
         return { success: true, url: page.url() }
       })
     },
@@ -244,7 +401,7 @@ export function registerBrowserTools(
     name: 'browser.extract', description: 'Extract text from an element',
     inputSchema: z.object({ target: selectorSchema }), outputSchema: successSchema,
     execute: async ({ target }) => runtime.withPage(async (page) => {
-      const locator = runtime.locator(page, target)
+      const locator = await runtime.visibleLocator(page, target)
       await locator.waitFor({ state: 'visible', timeout: 15_000 })
       return {
         success: true,

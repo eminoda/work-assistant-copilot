@@ -6,15 +6,15 @@ import { cors } from 'hono/cors'
 import { streamSSE } from 'hono/streaming'
 import { z } from 'zod'
 import { ToolRegistry, type AgentEvent } from '@workcopilot/tool-registry'
-import { WorkflowEngine, workflowSchema, type ExecutionResult } from '@workcopilot/workflow-engine'
-import { recordingSchema, recordingToWorkflow, sortRecordingEvents } from '@workcopilot/browser-recorder'
+import { WorkflowEngine, workflowSchema, type ExecutionResult, type Workflow } from '@workcopilot/workflow-engine'
+import { recordingSchema, recordingToWorkflow, sortRecordingEvents, lastRecordedUrl, sessionCredentialKeyForUrl } from '@workcopilot/browser-recorder'
 import { registerBrowserTools, PlaywrightRuntime } from '@workcopilot/playwright-runtime'
 import { LocalCredentialProvider, getOrCreateLocalToken } from '@workcopilot/credential-provider'
 import { gitSnapshotSchema, scanGitRepository } from '@workcopilot/git-analyzer'
 import { fallbackSummary, rawMemoryFromGit } from '@workcopilot/memory-engine'
 import { createLanguageModel, ModelProvider, modelConfigSchema } from '@workcopilot/model-provider'
 import { registerExportTools } from '@workcopilot/feishu-adapter'
-import { WorkCopilotStore } from './store.js'
+import { NameConflictError, WorkCopilotStore } from './store.js'
 
 export type AppServices = {
   store: WorkCopilotStore
@@ -109,6 +109,104 @@ export async function createServices(store = new WorkCopilotStore()): Promise<Ap
   return { store, registry, engine: new WorkflowEngine(registry), credentials, browser, token, events }
 }
 
+function navigationKey(url: string) {
+  try {
+    const parsed = new URL(url)
+    let hash = parsed.hash
+    if (hash === '#' || hash === '#/') hash = ''
+    parsed.hash = hash
+    parsed.pathname = parsed.pathname.replace(/\/+$/, '') || '/'
+    return `${parsed.origin}${parsed.pathname}${parsed.search}${parsed.hash}`
+  } catch {
+    return url
+  }
+}
+
+/** Login workflows: open homeUrl + inject cookies; if no redirect, treat as success and skip full steps. */
+async function tryLoginSessionReuse(input: {
+  workflow: Workflow & { id: string }
+  services: AppServices
+  executionId: string
+  onEvent: (event: AgentEvent) => void
+}): Promise<ExecutionResult | null> {
+  const { workflow, services, executionId, onEvent } = input
+  const homeUrl = workflow.homeUrl
+  if (!homeUrl) return null
+
+  const keys = new Set<string>()
+  for (const step of workflow.steps) {
+    if (step.tool !== 'browser.setCookies') continue
+    const key = step.params.credentialKey
+    if (typeof key === 'string' && key) keys.add(key)
+  }
+  keys.add(sessionCredentialKeyForUrl(homeUrl))
+  keys.add(`workflow.${workflow.id}.session`)
+
+  const startedAt = new Date().toISOString()
+  const events: AgentEvent[] = []
+  const emit = (event: AgentEvent) => {
+    events.push(event)
+    onEvent(event)
+  }
+  emit({
+    type: 'workflow.started',
+    executionId,
+    message: `${workflow.name} (session reuse)`,
+    timestamp: startedAt,
+  })
+
+  try {
+    const values = new Map<string, unknown>()
+    const context = { executionId, emit, values }
+    let injected = false
+    for (const key of keys) {
+      const raw = await services.credentials.get(key)
+      if (!raw) continue
+      values.set(`credential:${key}`, raw)
+      await services.registry.execute('browser.setCookies', { credentialKey: key, url: homeUrl }, context)
+      injected = true
+    }
+    if (!injected) return null
+
+    await services.registry.execute('browser.open', { url: homeUrl }, context)
+    const page = await services.browser.page()
+    const current = page.url()
+    const stayed =
+      navigationKey(current) === navigationKey(homeUrl)
+      || current.replace(/\/+$/, '') === homeUrl.replace(/\/+$/, '')
+
+    if (!stayed) {
+      emit({
+        type: 'tool.progress',
+        executionId,
+        tool: 'browser.open',
+        message: `session redirected to ${current} — fall back to full workflow`,
+        timestamp: new Date().toISOString(),
+      })
+      return null
+    }
+
+    const finishedAt = new Date().toISOString()
+    emit({
+      type: 'workflow.finished',
+      executionId,
+      message: 'session reused — skip full workflow',
+      timestamp: finishedAt,
+    })
+    return {
+      id: executionId,
+      status: 'SUCCESS',
+      startedAt,
+      finishedAt,
+      outputs: { sessionReused: true, url: current },
+      events,
+    }
+  } catch (error) {
+    console.warn('[execute] session reuse failed', error)
+    return null
+  }
+}
+
 export function createApp(services: AppServices) {
   const app = new Hono()
   app.use('*', cors({
@@ -123,6 +221,11 @@ export function createApp(services: AppServices) {
   })
 
   app.get('/api/workflows', async (c) => c.json(await services.store.listWorkflows()))
+  app.get('/api/workflows/:id', async (c) => {
+    const workflow = await services.store.getWorkflow(c.req.param('id'))
+    if (!workflow) return c.json({ error: 'Workflow not found' }, 404)
+    return c.json(workflow)
+  })
   app.post('/api/workflows', async (c) => {
     const workflow = workflowSchema.parse(await c.req.json())
     return c.json(await services.store.saveWorkflow(workflow), 201)
@@ -130,15 +233,58 @@ export function createApp(services: AppServices) {
   app.delete('/api/workflows/:id', async (c) => { await services.store.deleteWorkflow(c.req.param('id')); return c.body(null, 204) })
   app.post('/api/recordings', async (c) => {
     const recording = recordingSchema.parse(await c.req.json())
-    const events = sortRecordingEvents(recording.events)
-    const firstUrl = events[0]?.url
+    await services.store.assertWorkflowNameAvailable(recording.name)
+    let events = sortRecordingEvents(recording.events)
+
+    // Persist cookie snapshots as credentials (same model as passwords) for later injection.
+    events = await Promise.all(events.map(async (event) => {
+      if (event.type !== 'cookies' || !event.cookies?.length) return event
+      const key = event.cookieCredentialKey || sessionCredentialKeyForUrl(event.url)
+      await services.credentials.save(key, JSON.stringify(event.cookies))
+      const { cookies: _omit, ...rest } = event
+      return { ...rest, cookieCredentialKey: key }
+    }))
+
+    const homeUrl = lastRecordedUrl(events)
     await services.store.saveRecording({
       name: recording.name,
       intent: recording.intent,
       events,
-      ...(firstUrl ? { url: firstUrl } : {}),
+      ...(homeUrl ? { url: homeUrl } : {}),
     })
     const workflow = await services.store.saveWorkflow(recordingToWorkflow({ ...recording, events }))
+
+    // Bind session cookie credential to this workflow id for clearer ownership.
+    if (workflow.id && homeUrl) {
+      const hostKey = sessionCredentialKeyForUrl(homeUrl)
+      const raw = await services.credentials.get(hostKey)
+      if (raw) {
+        const workflowKey = `workflow.${workflow.id}.session`
+        await services.credentials.save(workflowKey, raw)
+        const rebound = {
+          ...workflow,
+          steps: workflow.steps.map((step) => {
+            if (step.tool !== 'browser.setCookies') return step
+            const key = step.params.credentialKey
+            if (key !== hostKey) return step
+            return { ...step, params: { ...step.params, credentialKey: workflowKey, url: homeUrl } }
+          }),
+        }
+        // Update packed steps in DB by delete+recreate is heavy; patch via prisma update.
+        await services.store.db.workflow.update({
+          where: { id: workflow.id },
+          data: {
+            steps: {
+              kind: rebound.kind,
+              ...(rebound.homeUrl ? { homeUrl: rebound.homeUrl } : {}),
+              steps: rebound.steps,
+            } as never,
+          },
+        })
+        return c.json({ workflow: { ...rebound, id: workflow.id } }, 201)
+      }
+    }
+
     return c.json({ workflow }, 201)
   })
 
@@ -147,17 +293,60 @@ export function createApp(services: AppServices) {
     const workflow = await services.store.getWorkflow(c.req.param('id'))
     if (!workflow) return c.json({ error: 'Workflow not found' }, 404)
     const requestId = randomUUID()
-    console.log(`[execute] queued ${requestId} workflow=${workflow.id} name=${workflow.name}`)
-    const promise = services.engine.execute(
-      workflow,
-      (event) => {
+    console.log(`[execute] queued ${requestId} workflow=${workflow.id} name=${workflow.name} kind=${workflow.kind}`)
+
+    const run = async (): Promise<ExecutionResult> => {
+      const onEvent = (event: AgentEvent) => {
         const detail = [event.tool, event.message].filter(Boolean).join(' ')
         console.log(`[execute] ${requestId} ${event.type}${detail ? ` ${detail}` : ''}`)
         services.events.publish(event)
-      },
-      undefined,
-      requestId,
-    ).then(async (result) => {
+      }
+
+      if (workflow.kind === 'login' && workflow.homeUrl) {
+        const reused = await tryLoginSessionReuse({
+          workflow,
+          services,
+          executionId: requestId,
+          onEvent,
+        })
+        if (reused) {
+          console.log(`[execute] ${requestId} login session reuse success — skip full workflow`)
+          return reused
+        }
+        console.log(`[execute] ${requestId} login session reuse missed — run full workflow`)
+      }
+
+      return services.engine.execute(workflow, onEvent, undefined, requestId).then(async (result) => {
+        if (result.status !== 'SUCCESS' || workflow.kind !== 'login' || !workflow.homeUrl) return result
+        try {
+          const page = await services.browser.page()
+          const current = page.url()
+          if (/\/login(\/|$|\?|#)/i.test(current)) {
+            const error = `登录流程结束仍在登录页：${current}（期望进入 ${workflow.homeUrl}）`
+            console.error(`[execute] ${requestId} ${error}`)
+            return {
+              ...result,
+              status: 'FAILED' as const,
+              error,
+              events: [
+                ...result.events,
+                {
+                  type: 'workflow.failed' as const,
+                  executionId: requestId,
+                  message: error,
+                  timestamp: new Date().toISOString(),
+                },
+              ],
+            }
+          }
+        } catch (error) {
+          console.warn(`[execute] ${requestId} post-login URL check failed`, error)
+        }
+        return result
+      })
+    }
+
+    const promise = run().then(async (result) => {
       if (result.status === 'FAILED' || result.status === 'CANCELLED') {
         console.error(`[execute] ${requestId} ${result.status}: ${result.error ?? 'unknown error'}`)
       } else {
@@ -311,6 +500,7 @@ export function createApp(services: AppServices) {
   app.onError((error, c) => {
     console.error(error)
     if (error instanceof z.ZodError) return c.json({ error: 'Validation failed', issues: error.issues }, 400)
+    if (error instanceof NameConflictError) return c.json({ error: error.message }, 409)
     return c.json({ error: error.message }, 500)
   })
   return app

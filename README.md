@@ -1,31 +1,33 @@
 # WorkCopilot
 
-WorkCopilot is a local-first AI worker runtime for browser automation and developer work memory. It records browser activity as validated Workflow DSL, executes every action through a Tool Registry, and keeps credentials and work data on the local machine.
+基于 **Browser Agent + Desktop Agent + AI Runtime** 的个人工作助手。
 
-## Architecture
+融入日常办公：减少门户反复登录、沉淀开发工作事实、把提醒与定时交给本机后台——**释放双手，把时间留给思考与沉淀**。
+
+设计说明（愿景 / 架构 / 功能 / 路线图）见 **[docs/](./docs/README.md)**。  
+旧版 [`WORK_COPILOT_SYSTEM_DESIGN.md`](./WORK_COPILOT_SYSTEM_DESIGN.md) 仅作历史参考。
+
+## 怎么分工
+
+| 组件 | 角色 |
+|------|------|
+| **Browser Agent**（Chrome 扩展） | 办公主入口：录制页面操作、触发执行、轻量设置 |
+| **Desktop Agent**（Tauri） | 宿主 Runtime、后台定时、存储与系统能力（扩展权限不够时由它承接） |
+| **AI Runtime**（`agent-core`） | 本地 `127.0.0.1` API：Workflow DSL、工具执行、凭证与记忆 |
 
 ```text
-Chrome Extension / Tauri Desktop
-              |
-       HTTP + SSE + WebSocket
-              |
-       Hono Agent Runtime
-              |
-   Workflow Engine -> Tool Registry
-       |                  |
- Browser Recorder     Playwright / Git / Memory / Export
+Chrome Extension  ──HTTP+token──►  AI Runtime  ◄──启停──  Tauri Desktop
+     录制/触发                      Workflow / Tools              定时/通知
 ```
 
-The language model never generates JavaScript for direct execution. It can classify intent and propose Workflow DSL, but only registered and Zod-validated tools can perform actions.
+模型不直接生成可执行业务脚本；能力一律经 **Workflow DSL → Tool Registry** 落地。
 
-## Requirements
+## 环境
 
 - Node.js 22+
 - pnpm 10+
-- Rust 1.77+ and the platform prerequisites for Tauri v2
-- Chrome or Chromium
-
-## Setup
+- Rust 1.77+（Tauri）
+- Chrome / Chromium
 
 ```powershell
 pnpm install
@@ -34,109 +36,63 @@ pnpm db:push
 pnpm exec playwright install chromium
 ```
 
-Optional environment values are documented in `.env.example`. Runtime data is stored in `~/.workcopilot` by default. Override it with `WORKCOPILOT_HOME`.
+数据默认在 `~/.workcopilot`（可用 `WORKCOPILOT_HOME` 覆盖）。环境变量见 `.env.example`。
 
-## Start the runtime
+## 启动
+
+**仅 Runtime：**
 
 ```powershell
 pnpm runtime
 ```
 
-The service listens only on `127.0.0.1:4317`. On first startup it creates `~/.workcopilot/credentials/runtime.token.secret`. Use that token in the desktop app and browser Side Panel.
+监听 `127.0.0.1:4317`。首次启动会生成 `~/.workcopilot/credentials/runtime.token.secret`，扩展与桌面端 Settings 填入该 token。
 
-## Load the Chrome extension
-
-```powershell
-pnpm --filter @workcopilot/chrome-extension build
-```
-
-1. Open `chrome://extensions`.
-2. Enable **Developer mode**.
-3. Choose **Load unpacked**.
-4. Select `apps/chrome-extension/dist`.
-5. Click the WorkCopilot extension icon to open the Side Panel.
-6. Enter the local runtime token and connect.
-
-The recorder captures navigation, clicks, form submissions and non-secret input. Password fields are converted to credential references; plaintext passwords are never added to recordings.
-
-## Start the desktop app
-
-Web UI development:
-
-```powershell
-pnpm --filter @workcopilot/desktop-agent dev
-```
-
-Tauri host:
+**桌面端（推荐，会拉起 Runtime）：**
 
 ```powershell
 pnpm --filter @workcopilot/desktop-agent tauri
 ```
 
-The Tauri host starts and stops the local runtime, hides the window on close, and provides an explicit tray exit action.
+仅前端：`pnpm --filter @workcopilot/desktop-agent dev`
 
-## API
+**Chrome 扩展：**
 
-All endpoints except `/api/health` require `Authorization: Bearer <local-token>`.
+```powershell
+pnpm --filter @workcopilot/chrome-extension build
+```
 
-- `GET /api/health`
-- `GET|POST /api/workflows`
-- `DELETE /api/workflows/:id`
-- `POST /api/workflows/:id/execute`
-- `GET /api/executions/:id`
-- `POST /api/recordings`
-- `GET|POST /api/projects`
-- `POST /api/projects/:id/scan`
-- `GET|POST /api/memories`
-- `POST /api/reports`
-- `GET|PUT /api/settings/:key`
-- `GET|POST /api/models`
-- `POST /api/models/test`
-- `POST /api/chat`
-- `POST /api/chat/stream`
-- `GET /api/events` (SSE)
-- `WS /ws/events?token=<local-token>`
+1. `chrome://extensions` → 开发者模式 → 加载已解压的 `apps/chrome-extension/dist`
+2. 打开 Side Panel → 齿轮 Settings → 粘贴 runtime token → 连接
 
-## Model providers
+## 当前能力（摘要）
 
-The common model interface supports OpenAI-compatible APIs, Anthropic, Azure OpenAI, Alibaba Bailian and local OpenAI-compatible servers. Provider metadata is stored in SQLite; API keys are stored by `credential-provider`.
+- 录制 click / input / 导航 / tab；密码走本地 credential；录制后命名并保存 Workflow
+- Playwright 回放；扩展内 Run / Delete / Delete all
+- 桌面端已存 token 时启动自动连接
 
-## Work memory
+未完成与下一迭代优先级见 [docs/roadmap.md](./docs/roadmap.md)。示例 DSL：`examples/workflows/`。
 
-Projects are scanned with directory discovery and Git commands, not Git hooks. WorkCopilot stores factual snapshots separately from semantic or report output and can create daily, weekly, quarterly and yearly reports.
-
-## Business workflow examples
-
-`examples/workflows` contains parameterized templates for:
-
-- Zentao login
-- Webmail search
-- OA form submission
-
-They demonstrate the generic Workflow and credential abstractions and intentionally do not target a real enterprise deployment. Record a new workflow against the actual system instead of editing generated scripts.
-
-## Quality checks
+## 校验
 
 ```powershell
 pnpm typecheck
 pnpm test
 pnpm build
-cargo check --manifest-path apps/desktop-agent/src-tauri/Cargo.toml
 ```
 
-The deterministic login fixture is under `tests/fixtures`. The browser E2E test verifies Workflow DSL → Tool Registry → Playwright → successful login.
+## 包边界
 
-## Package boundaries
+| 包 | 职责 |
+|----|------|
+| `agent-core` | Hono API、编排入口 |
+| `workflow-engine` | 步骤生命周期 |
+| `tool-registry` | Zod 校验工具分发 |
+| `browser-recorder` | 录制事件 → DSL |
+| `playwright-runtime` | **唯一**允许依赖 Playwright 的包 |
+| `credential-provider` | 本地密钥 |
+| `git-analyzer` / `memory-engine` | Git 事实与记忆辅助 |
+| `model-provider` | 模型抽象 |
+| `feishu-adapter` | Markdown / 飞书导出 |
 
-- `agent-core`: Hono API, agent loop and repositories
-- `tool-registry`: validated tool contracts and dispatch
-- `workflow-engine`: step orchestration and lifecycle
-- `browser-recorder`: raw browser event to Workflow DSL conversion
-- `playwright-runtime`: the only package allowed to import Playwright
-- `credential-provider`: local secret storage
-- `git-analyzer`: factual Git scanning
-- `memory-engine`: raw, semantic and summary memory helpers
-- `model-provider`: Vercel AI SDK provider abstraction
-- `feishu-adapter`: Feishu and Markdown export tools
-
-Workflow editing, cloud sync, multi-user accounts and a cloud backend are intentionally out of scope for v0.1.
+当前阶段不做：云同步、多用户、万能可视化 Workflow 编辑器。
