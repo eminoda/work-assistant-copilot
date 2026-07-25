@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-get-or-create-runtime-token"
+description = "Allows reading or creating the local runtime bearer token"
+commands.allow = ["get_or_create_runtime_token"]

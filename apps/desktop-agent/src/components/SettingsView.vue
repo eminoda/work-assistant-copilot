@@ -7,6 +7,7 @@ const DEFAULT_MODEL_NAME = 'deepseek-v4-flash'
 const props = defineProps<{
   connected: boolean
   initialToken: string
+  ensureLocalToken: () => Promise<string>
   connect: (token: string) => Promise<void>
   getSettings: () => Promise<Record<string, string>>
   setScanRoots: (roots: string[]) => Promise<unknown>
@@ -30,6 +31,7 @@ const props = defineProps<{
 
 const token = shallowRef(props.initialToken)
 const busy = shallowRef(false)
+const copyMsg = shallowRef('')
 const feedback = shallowRef<{ kind: 'ok' | 'error'; text: string } | null>(
   props.connected ? { kind: 'ok', text: '已连接到本地 runtime' } : null,
 )
@@ -62,6 +64,29 @@ async function onConnect() {
     }
   } finally {
     busy.value = false
+  }
+}
+
+async function copyToken() {
+  const value = token.value.trim()
+  if (!value) return
+  try {
+    await navigator.clipboard.writeText(value)
+    copyMsg.value = '已复制到剪贴板'
+  } catch {
+    copyMsg.value = '复制失败，请手动选中复制'
+  }
+  window.setTimeout(() => {
+    copyMsg.value = ''
+  }, 2000)
+}
+
+async function bootstrapToken() {
+  try {
+    const local = await props.ensureLocalToken()
+    if (local) token.value = local
+  } catch {
+    // keep whatever is already in the field
   }
 }
 
@@ -157,8 +182,14 @@ watch(() => props.connected, (value) => {
   if (value) void loadExtras()
 })
 
+watch(() => props.initialToken, (value) => {
+  if (value && value !== token.value) token.value = value
+})
+
 onMounted(() => {
-  if (props.connected) void loadExtras()
+  void bootstrapToken().then(() => {
+    if (props.connected) void loadExtras()
+  })
 })
 </script>
 
@@ -170,19 +201,28 @@ onMounted(() => {
 
     <article class="form-card">
       <h3>Runtime Token</h3>
+      <p class="hint">首次启动自动生成，保存在本机 <code>~/.workcopilot/credentials/</code>。扩展侧粘贴同一 token 即可连接。</p>
       <label>
         Bearer token
         <input
           v-model="token"
-          type="password"
+          type="text"
           autocomplete="off"
-          placeholder="Paste runtime.token.secret"
+          spellcheck="false"
+          class="token-input"
+          placeholder="正在生成…"
           @keydown.enter.prevent="onConnect"
         />
       </label>
-      <button class="primary-action" type="button" :disabled="busy || !token.trim()" @click="onConnect">
-        {{ busy ? 'Connecting…' : 'Save & connect' }}
-      </button>
+      <div class="btn-row">
+        <button class="primary-action" type="button" :disabled="busy || !token.trim()" @click="onConnect">
+          {{ busy ? 'Connecting…' : 'Save & connect' }}
+        </button>
+        <button class="secondary-action" type="button" :disabled="!token.trim()" @click="copyToken">
+          复制 Token
+        </button>
+      </div>
+      <p v-if="copyMsg" class="hint">{{ copyMsg }}</p>
       <p v-if="feedback" class="feedback" :data-kind="feedback.kind">{{ feedback.text }}</p>
     </article>
 

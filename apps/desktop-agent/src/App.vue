@@ -24,6 +24,7 @@ onMounted(() => {
         v-if="active === 'Settings'"
         :connected="runtime.connected.value"
         :initial-token="runtime.token.value"
+        :ensure-local-token="runtime.ensureLocalToken"
         :connect="runtime.connect"
         :get-settings="runtime.getSettings"
         :set-scan-roots="runtime.setScanRoots"

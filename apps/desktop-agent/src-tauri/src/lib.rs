@@ -1,7 +1,13 @@
+use std::fs;
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use rand::RngCore;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -18,17 +24,66 @@ fn pipe_runtime_logs<R: std::io::Read + Send + 'static>(stream: Option<R>, label
     });
 }
 
+fn workcopilot_home() -> PathBuf {
+    if let Some(custom) = std::env::var_os("WORKCOPILOT_HOME") {
+        return PathBuf::from(custom);
+    }
+    #[cfg(windows)]
+    {
+        PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join(".workcopilot")
+    }
+    #[cfg(not(windows))]
+    {
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".workcopilot")
+    }
+}
+
+fn runtime_token_path() -> PathBuf {
+    workcopilot_home()
+        .join("credentials")
+        .join("runtime.token.secret")
+}
+
+#[tauri::command]
+fn get_or_create_runtime_token() -> Result<String, String> {
+    let path = runtime_token_path();
+    if let Ok(existing) = fs::read_to_string(&path) {
+        let trimmed = existing.trim().to_string();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+    }
+
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let token = URL_SAFE_NO_PAD.encode(bytes);
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(&path, &token).map_err(|error| error.to_string())?;
+    Ok(token)
+}
+
 fn spawn_runtime() -> Option<Child> {
-    let command = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
+    let command_name = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
     let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    let mut child = Command::new(command)
+    let mut command = Command::new(command_name);
+    command
         .args(["--filter", "@workcopilot/agent-core", "dev"])
         .current_dir(&workspace)
         .env("WORKCOPILOT_HEADLESS", "false")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = command.spawn().ok()?;
     pipe_runtime_logs(child.stdout.take(), "stdout");
     pipe_runtime_logs(child.stderr.take(), "stderr");
     eprintln!(
@@ -41,6 +96,7 @@ fn spawn_runtime() -> Option<Child> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![get_or_create_runtime_token])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();

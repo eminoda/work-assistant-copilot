@@ -59,6 +59,17 @@ export type RecordingRow = {
   updatedAt: string
 }
 
+async function readOrCreateLocalToken(): Promise<string | null> {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const next = await invoke<string>('get_or_create_runtime_token')
+    const trimmed = next?.trim()
+    return trimmed ? trimmed : null
+  } catch {
+    return null
+  }
+}
+
 export function useRuntimeClient() {
   const token = shallowRef(localStorage.getItem('workcopilot.token') ?? '')
   const connected = shallowRef(false)
@@ -92,6 +103,14 @@ export function useRuntimeClient() {
     }
   }
 
+  async function ensureLocalToken() {
+    const local = await readOrCreateLocalToken()
+    if (!local) return token.value.trim()
+    token.value = local
+    localStorage.setItem('workcopilot.token', local)
+    return local
+  }
+
   async function connect(nextToken: string) {
     const trimmed = nextToken.trim()
     if (!trimmed) throw new Error('请输入 runtime token')
@@ -117,6 +136,7 @@ export function useRuntimeClient() {
   }
 
   async function autoConnect(retries = 12, delayMs = 500) {
+    await ensureLocalToken()
     const saved = token.value.trim()
     if (!saved) return
 
@@ -219,6 +239,7 @@ export function useRuntimeClient() {
     connected: readonly(connected),
     loading: readonly(loading),
     request,
+    ensureLocalToken,
     connect,
     autoConnect,
     getSettings,
