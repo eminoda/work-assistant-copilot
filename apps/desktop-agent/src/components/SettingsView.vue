@@ -8,6 +8,7 @@ const props = defineProps<{
   connected: boolean
   initialToken: string
   ensureLocalToken: () => Promise<string>
+  ensureRuntime: () => Promise<void>
   connect: (token: string) => Promise<void>
   getSettings: () => Promise<Record<string, string>>
   setScanRoots: (roots: string[]) => Promise<unknown>
@@ -31,6 +32,7 @@ const props = defineProps<{
 
 const token = shallowRef(props.initialToken)
 const busy = shallowRef(false)
+const startingRuntime = shallowRef(false)
 const copyMsg = shallowRef('')
 const feedback = shallowRef<{ kind: 'ok' | 'error'; text: string } | null>(
   props.connected ? { kind: 'ok', text: '已连接到本地 runtime' } : null,
@@ -64,6 +66,27 @@ async function onConnect() {
     }
   } finally {
     busy.value = false
+  }
+}
+
+async function onStartRuntime() {
+  startingRuntime.value = true
+  feedback.value = null
+  try {
+    await props.ensureRuntime()
+    feedback.value = { kind: 'ok', text: 'Runtime 已在 http://127.0.0.1:4317 就绪' }
+    if (token.value.trim()) {
+      await props.connect(token.value)
+      feedback.value = { kind: 'ok', text: 'Runtime 已启动并完成连接' }
+      await loadExtras()
+    }
+  } catch (error) {
+    feedback.value = {
+      kind: 'error',
+      text: error instanceof Error ? error.message : '启动 Runtime 失败',
+    }
+  } finally {
+    startingRuntime.value = false
   }
 }
 
@@ -202,6 +225,7 @@ onMounted(() => {
     <article class="form-card">
       <h3>Runtime Token</h3>
       <p class="hint">首次启动自动生成，保存在本机 <code>~/.workcopilot/credentials/</code>。扩展侧粘贴同一 token 即可连接。</p>
+      <p class="hint">连接前会尝试自动拉起本机 Runtime；若失败，可点「启动 Runtime」，或手动执行 <code>pnpm runtime</code>。</p>
       <label>
         Bearer token
         <input
@@ -215,8 +239,11 @@ onMounted(() => {
         />
       </label>
       <div class="btn-row">
-        <button class="primary-action" type="button" :disabled="busy || !token.trim()" @click="onConnect">
+        <button class="primary-action" type="button" :disabled="busy || startingRuntime || !token.trim()" @click="onConnect">
           {{ busy ? 'Connecting…' : 'Save & connect' }}
+        </button>
+        <button class="secondary-action" type="button" :disabled="busy || startingRuntime" @click="onStartRuntime">
+          {{ startingRuntime ? '启动中…' : '启动 Runtime' }}
         </button>
         <button class="secondary-action" type="button" :disabled="!token.trim()" @click="copyToken">
           复制 Token

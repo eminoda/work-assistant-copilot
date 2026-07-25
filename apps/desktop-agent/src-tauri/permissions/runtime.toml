@@ -1,0 +1,14 @@
+[[permission]]
+identifier = "allow-ensure-runtime"
+description = "Allows ensuring the local WorkCopilot runtime is running"
+commands.allow = ["ensure_runtime"]
+
+[[permission]]
+identifier = "allow-runtime-status"
+description = "Allows reading whether the local runtime port is up"
+commands.allow = ["runtime_status"]
+
+[[permission]]
+identifier = "allow-quit-app"
+description = "Allows fully quitting the desktop app from the UI"
+commands.allow = ["quit_app"]

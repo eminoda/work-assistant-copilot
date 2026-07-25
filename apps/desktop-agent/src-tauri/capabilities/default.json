@@ -7,6 +7,9 @@
     "core:default",
     "core:tray:default",
     "core:menu:default",
-    "allow-get-or-create-runtime-token"
+    "allow-get-or-create-runtime-token",
+    "allow-ensure-runtime",
+    "allow-runtime-status",
+    "allow-quit-app"
   ]
 }

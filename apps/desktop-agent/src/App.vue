@@ -25,6 +25,7 @@ onMounted(() => {
         :connected="runtime.connected.value"
         :initial-token="runtime.token.value"
         :ensure-local-token="runtime.ensureLocalToken"
+        :ensure-runtime="runtime.ensureRuntime"
         :connect="runtime.connect"
         :get-settings="runtime.getSettings"
         :set-scan-roots="runtime.setScanRoots"

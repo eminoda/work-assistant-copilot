@@ -70,6 +70,20 @@ async function readOrCreateLocalToken(): Promise<string | null> {
   }
 }
 
+async function ensureRuntimeProcess(): Promise<void> {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke<string>('ensure_runtime')
+  } catch (error) {
+    const message = typeof error === 'string'
+      ? error
+      : error instanceof Error
+        ? error.message
+        : '无法自动启动 Runtime'
+    throw new Error(message)
+  }
+}
+
 export function useRuntimeClient() {
   const token = shallowRef(localStorage.getItem('workcopilot.token') ?? '')
   const connected = shallowRef(false)
@@ -111,9 +125,15 @@ export function useRuntimeClient() {
     return local
   }
 
+  async function ensureRuntime() {
+    await ensureRuntimeProcess()
+  }
+
   async function connect(nextToken: string) {
     const trimmed = nextToken.trim()
     if (!trimmed) throw new Error('请输入 runtime token')
+
+    await ensureRuntimeProcess()
 
     let health: { status?: string }
     try {
@@ -121,10 +141,11 @@ export function useRuntimeClient() {
       if (!response.ok) throw new Error('Runtime 未启动')
       health = await response.json()
     } catch (error) {
+      if (error instanceof Error && !/fetch|Failed to fetch|NetworkError/i.test(error.message) && error.message !== 'Runtime 未启动') {
+        throw error
+      }
       if (error instanceof Error && error.message === 'Runtime 未启动') throw error
-      throw new Error(
-        '无法连接本地 Runtime（http://127.0.0.1:4317）。请先运行 pnpm runtime，或从源码目录启动桌面端以便自动拉起。',
-      )
+      throw new Error('Runtime 未在 http://127.0.0.1:4317 响应，请点击「启动 Runtime」或手动运行 pnpm runtime')
     }
     if (health.status !== 'ok') throw new Error('Runtime 不可用')
 
@@ -142,8 +163,14 @@ export function useRuntimeClient() {
     connected.value = true
   }
 
-  async function autoConnect(retries = 20, delayMs = 500) {
+  async function autoConnect(retries = 24, delayMs = 500) {
     await ensureLocalToken()
+    try {
+      await ensureRuntimeProcess()
+    } catch (error) {
+      console.warn('[desktop] ensure runtime on boot failed', error)
+    }
+
     const saved = token.value.trim()
     if (!saved) return
 
@@ -247,6 +274,7 @@ export function useRuntimeClient() {
     loading: readonly(loading),
     request,
     ensureLocalToken,
+    ensureRuntime,
     connect,
     autoConnect,
     getSettings,

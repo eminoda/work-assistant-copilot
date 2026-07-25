@@ -8,6 +8,15 @@ const items = [
   { id: 'Projects', label: '项目' },
   { id: 'Recordings', label: '录制' },
 ] as const
+
+async function quitApp() {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('quit_app')
+  } catch {
+    window.close()
+  }
+}
 </script>
 
 <template>
@@ -30,9 +39,13 @@ const items = [
         {{ item.label }}
       </button>
     </nav>
-    <div class="runtime">
-      <i :class="{ online: connected }"></i>
-      {{ connected ? 'Runtime online' : 'Runtime offline' }}
+    <div class="sidebar-footer">
+      <div class="runtime">
+        <i :class="{ online: connected }"></i>
+        {{ connected ? 'Runtime online' : 'Runtime offline' }}
+      </div>
+      <p class="tray-hint">关闭窗口会退到托盘；右下角托盘图标可重新打开，选「退出」才会真正结束。</p>
+      <button class="quit-action" type="button" @click="quitApp">退出应用</button>
     </div>
   </aside>
 </template>
