@@ -64,8 +64,13 @@ jobs:
         with:
           workspaces: apps/desktop-agent/src-tauri -> target
 
+      # Desktop UI packaging does not need agent-core / better-sqlite3.
+      # Skipping lifecycle scripts avoids slow/failing node-gyp on Windows runners.
       - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --filter @workcopilot/desktop-agent... --ignore-scripts
+
+      - name: Rebuild esbuild binary
+        run: pnpm rebuild esbuild
 
       - name: Build Desktop Agent and upload to GitHub Release
         uses: tauri-apps/tauri-action@v1
