@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>WorkCopilot — Journal</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 1280px; height: 800px; overflow: hidden;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #070b14; color: #e8eef7;
+      display: grid; place-items: center;
+    }
+    .frame {
+      width: 420px; height: 720px; background: #0c111b;
+      border: 1px solid #263348; border-radius: 18px;
+      box-shadow: 0 24px 80px rgba(0,0,0,.45);
+      padding: 18px 16px; display: grid; gap: 14px; align-content: start;
+    }
+    .backdrop {
+      position: absolute; inset: 0;
+      background:
+        radial-gradient(ellipse at 20% 20%, rgba(109,93,252,.18), transparent 45%),
+        radial-gradient(ellipse at 80% 70%, rgba(49,211,178,.12), transparent 40%),
+        #070b14;
+      z-index: -1;
+    }
+    html, body { position: relative; }
+    .top { display: flex; align-items: center; gap: 10px; }
+    .icon-btn {
+      width: 34px; height: 34px; border-radius: 9px; border: 1px solid #34445c;
+      background: #202d42; color: #c5d0e0; display: grid; place-items: center;
+    }
+    h1 { font-size: 16px; flex: 1; }
+    .meta { color: #8fa0b8; font-size: 12px; }
+    .card {
+      background: #121a28; border: 1px solid #263348; border-radius: 14px; padding: 14px;
+      display: grid; gap: 10px;
+    }
+    .card h2 { font-size: 14px; color: #9eb0c8; font-weight: 600; }
+    .proj { font-size: 16px; font-weight: 700; margin-top: 4px; }
+    .feat { font-size: 13px; color: #7be0c8; margin-top: 8px; }
+    .body { font-size: 13px; color: #c5d0e0; line-height: 1.55; }
+    .tag {
+      display: inline-flex; width: fit-content; padding: 4px 8px; border-radius: 999px;
+      font-size: 11px; background: rgba(49,211,178,.12); color: #7be0c8;
+      border: 1px solid rgba(49,211,178,.28);
+    }
+    .weeks { display: flex; gap: 8px; flex-wrap: wrap; }
+    .week {
+      padding: 8px 10px; border-radius: 10px; background: #121a28; border: 1px solid #263348;
+      font-size: 12px; color: #8fa0b8;
+    }
+    .week.on { border-color: #6d5dfc; color: #e8eef7; background: rgba(109,93,252,.12); }
+    .days { display: grid; gap: 8px; }
+    .day {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 14px; border-radius: 12px; background: #121a28; border: 1px solid #263348;
+    }
+    .day strong { font-size: 14px; }
+    .day small { color: #8fa0b8; display: block; margin-top: 2px; font-size: 11px; }
+    .ai { font-size: 11px; color: #7be0c8; }
+    .banner {
+      position: absolute; left: 64px; top: 120px; max-width: 360px;
+      color: #8fa0b8; font-size: 14px; line-height: 1.6;
+    }
+    .banner h2 { color: #e8eef7; font-size: 28px; margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+  <div class="backdrop"></div>
+  <div class="banner">
+    <h2>日报 / 周报</h2>
+    <p>Git 扫描沉淀事实，AI 按项目整理日总结。事实与总结分离，便于回看与纠错。</p>
+  </div>
+  <div class="frame">
+    <div class="top">
+      <div class="icon-btn">←</div>
+      <h1>日报 · 2026-07-25</h1>
+    </div>
+    <span class="tag">AI 已分析 · 与内容同步</span>
+    <div class="card">
+      <div class="proj">## work-assistant-copilot</div>
+      <div class="feat">### Desktop 四模块管理台</div>
+      <p class="body">完成设置 / AI 用量 / 项目 / 录制查询页；补齐用量持久化与项目关联日报 API。</p>
+      <div class="feat">### Chrome 扩展上架准备</div>
+      <p class="body">整理商店说明、权限理由，并输出符合规格的产品截图。</p>
+    </div>
+    <div class="card">
+      <h2>本月自然周</h2>
+      <div class="weeks">
+        <div class="week">第 1 周</div>
+        <div class="week">第 2 周</div>
+        <div class="week">第 3 周</div>
+        <div class="week on">第 4 周</div>
+      </div>
+      <div class="days">
+        <div class="day">
+          <div><strong>07-25</strong><small>3 项 · Git + 手写</small></div>
+          <span class="ai">已分析</span>
+        </div>
+        <div class="day">
+          <div><strong>07-24</strong><small>5 项 · Git</small></div>
+          <span class="ai">已分析</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

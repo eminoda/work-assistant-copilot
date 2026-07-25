@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>WorkCopilot — Recording</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 1280px; height: 800px; overflow: hidden;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #070b14; color: #e8eef7;
+      display: grid; grid-template-columns: 1fr 380px;
+    }
+    .browser {
+      background: linear-gradient(160deg, #10182a 0%, #0c111b 55%, #0a1620 100%);
+      padding: 28px 32px; border-right: 1px solid #1c2740;
+      display: grid; align-content: start; gap: 18px;
+    }
+    .chrome-bar {
+      display: flex; align-items: center; gap: 10px;
+      background: #121a28; border: 1px solid #263348; border-radius: 12px; padding: 10px 14px;
+    }
+    .dots { display: flex; gap: 6px; }
+    .dots i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+    .dots i:nth-child(1) { background: #ff5f57; }
+    .dots i:nth-child(2) { background: #febc2e; }
+    .dots i:nth-child(3) { background: #28c840; }
+    .url { flex: 1; background: #0c111b; border-radius: 8px; padding: 8px 12px; color: #8fa0b8; font-size: 13px; }
+    .page {
+      background: #121a28; border: 1px solid #263348; border-radius: 16px;
+      padding: 24px; min-height: 560px; position: relative;
+    }
+    .toolbar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+    .chip {
+      padding: 8px 12px; border-radius: 10px; background: #1a2233; border: 1px solid #263348;
+      font-size: 13px; color: #c5d0e0;
+    }
+    .chip.active { outline: 2px solid #31d3b2; background: rgba(49,211,178,.1); }
+    .pulse {
+      position: absolute; left: 180px; top: 210px;
+      width: 120px; height: 40px; border-radius: 10px;
+      border: 2px solid #31d3b2; box-shadow: 0 0 0 6px rgba(49,211,178,.18);
+      animation: none;
+    }
+    .list { margin-top: 80px; display: grid; gap: 10px; max-width: 480px; }
+    .row {
+      display: flex; justify-content: space-between; padding: 12px 14px;
+      background: #0c111b; border: 1px solid #263348; border-radius: 10px; font-size: 13px;
+    }
+    .row span { color: #8fa0b8; }
+    .panel {
+      background: #0c111b; padding: 18px 16px; display: grid; gap: 14px; align-content: start;
+    }
+    .brand { display: flex; gap: 12px; align-items: center; }
+    .mark {
+      width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center;
+      font-weight: 800; background: linear-gradient(135deg, #6d5dfc, #31d3b2);
+    }
+    h1 { font-size: 18px; }
+    .tags { display: flex; gap: 8px; }
+    .tag {
+      display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px;
+      border-radius: 999px; font-size: 12px; font-weight: 600;
+      background: rgba(200,72,92,.14); color: #ff9aaa; border: 1px solid rgba(200,72,92,.35);
+    }
+    .tag.ok {
+      background: rgba(49,211,178,.12); color: #7be0c8; border-color: rgba(49,211,178,.28);
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .card {
+      background: #121a28; border: 1px solid #263348; border-radius: 14px; padding: 14px;
+      display: grid; gap: 10px;
+    }
+    .card h2 { font-size: 15px; }
+    .card p { color: #8fa0b8; font-size: 12px; line-height: 1.45; }
+    .btns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .btns button {
+      border: 0; border-radius: 9px; padding: 10px; font-weight: 650; color: #fff; cursor: default;
+    }
+    .pause { background: #202d42; }
+    .stop { background: #c8485c; }
+    .steps { display: grid; gap: 8px; max-height: 360px; }
+    .step {
+      font-size: 12px; padding: 10px 12px; border-radius: 10px;
+      background: #0c111b; border: 1px solid #1c2740; color: #c5d0e0;
+    }
+    .step code { color: #7be0c8; }
+    .step small { display: block; color: #8fa0b8; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <section class="browser">
+    <div class="chrome-bar">
+      <div class="dots"><i></i><i></i><i></i></div>
+      <div class="url">https://zentao.example.com/my-bug</div>
+    </div>
+    <div class="page">
+      <div class="toolbar">
+        <div class="chip">全部</div>
+        <div class="chip active">由我创建</div>
+        <div class="chip">指派给我</div>
+      </div>
+      <div class="pulse"></div>
+      <div class="list">
+        <div class="row"><strong>#1024 登录页偶发 500</strong><span>处理中</span></div>
+        <div class="row"><strong>#1018 导出 Excel 列错位</strong><span>已解决</span></div>
+        <div class="row"><strong>#1002 移动端样式溢出</strong><span>新建</span></div>
+      </div>
+    </div>
+  </section>
+  <aside class="panel">
+    <div class="brand"><div class="mark">W</div><h1>Work Copilot</h1></div>
+    <div class="tags">
+      <span class="tag ok"><i class="dot"></i>已连接</span>
+      <span class="tag"><i class="dot"></i>录制中</span>
+    </div>
+    <div class="card">
+      <h2>正在录制工作流</h2>
+      <p>点击、输入、导航与多标签会写入步骤。可开启「信息抓取」把页面文本送入消息中心。</p>
+      <div class="btns">
+        <button class="pause" type="button">暂停</button>
+        <button class="stop" type="button">停止并保存</button>
+      </div>
+    </div>
+    <div class="card steps">
+      <div class="step"><code>browser.open</code><small>https://portal.example.com</small></div>
+      <div class="step"><code>browser.input</code><small>credentialKey · portal.password</small></div>
+      <div class="step"><code>browser.click</code><small>登录 → resultUrl /my</small></div>
+      <div class="step"><code>browser.click</code><small>打开禅道</small></div>
+      <div class="step"><code>browser.extract</code><small>我的 Bug 列表 · 信息抓取</small></div>
+    </div>
+  </aside>
+</body>
+</html>

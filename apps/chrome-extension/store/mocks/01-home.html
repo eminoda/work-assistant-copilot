@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>WorkCopilot — Home</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 1280px; height: 800px; overflow: hidden;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #070b14;
+      color: #e8eef7;
+      display: grid;
+      grid-template-columns: 1fr 380px;
+    }
+    .browser {
+      background: linear-gradient(160deg, #10182a 0%, #0c111b 55%, #0a1620 100%);
+      padding: 28px 32px;
+      border-right: 1px solid #1c2740;
+      display: grid;
+      align-content: start;
+      gap: 18px;
+    }
+    .chrome-bar {
+      display: flex; align-items: center; gap: 10px;
+      background: #121a28; border: 1px solid #263348; border-radius: 12px;
+      padding: 10px 14px;
+    }
+    .dots { display: flex; gap: 6px; }
+    .dots i { width: 10px; height: 10px; border-radius: 50%; display: block; }
+    .dots i:nth-child(1) { background: #ff5f57; }
+    .dots i:nth-child(2) { background: #febc2e; }
+    .dots i:nth-child(3) { background: #28c840; }
+    .url {
+      flex: 1; background: #0c111b; border-radius: 8px; padding: 8px 12px;
+      color: #8fa0b8; font-size: 13px;
+    }
+    .page-card {
+      background: #121a28; border: 1px solid #263348; border-radius: 16px;
+      padding: 28px; min-height: 520px;
+    }
+    .page-card h2 { font-size: 28px; margin-bottom: 8px; }
+    .page-card p { color: #8fa0b8; margin-bottom: 24px; line-height: 1.5; }
+    .fake-form { display: grid; gap: 12px; max-width: 360px; }
+    .fake-form label { font-size: 12px; color: #8fa0b8; display: grid; gap: 6px; }
+    .fake-form input {
+      border: 1px solid #34445c; background: #0c111b; color: #e8eef7;
+      border-radius: 9px; padding: 10px 12px;
+    }
+    .fake-form button {
+      margin-top: 8px; border: 0; border-radius: 9px; padding: 11px 16px;
+      background: #2b6cb0; color: white; font-weight: 650; width: fit-content;
+    }
+    .caption {
+      color: #6d7f99; font-size: 13px; margin-top: 18px;
+    }
+    .panel {
+      background: #0c111b; padding: 18px 16px;
+      display: grid; gap: 14px; align-content: start;
+      border-left: 1px solid #1c2740;
+    }
+    .brand { display: flex; gap: 12px; align-items: center; }
+    .mark {
+      width: 36px; height: 36px; border-radius: 50%;
+      display: grid; place-items: center; font-weight: 800;
+      background: linear-gradient(135deg, #6d5dfc, #31d3b2);
+    }
+    h1 { font-size: 18px; }
+    .tags { display: flex; gap: 8px; flex-wrap: wrap; }
+    .tag {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+      background: rgba(49,211,178,.12); color: #7be0c8; border: 1px solid rgba(49,211,178,.28);
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .dock {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+    }
+    .tile {
+      display: grid; gap: 6px; justify-items: center; padding: 12px 6px;
+      border-radius: 14px; background: #121a28; border: 1px solid #263348; font-size: 12px;
+    }
+    .tile svg { width: 22px; height: 22px; fill: #9eb0c8; }
+    .wf {
+      background: #121a28; border: 1px solid #263348; border-radius: 14px;
+      padding: 12px 14px; display: grid; gap: 10px;
+    }
+    .wf h3 { font-size: 13px; color: #8fa0b8; font-weight: 600; }
+    .item {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      padding: 10px 0; border-top: 1px solid #1c2740;
+    }
+    .item:first-of-type { border-top: 0; padding-top: 0; }
+    .item strong { display: block; font-size: 14px; }
+    .item small { color: #8fa0b8; font-size: 11px; }
+    .badges { display: flex; gap: 6px; margin-top: 4px; }
+    .badge {
+      font-size: 10px; padding: 2px 7px; border-radius: 999px;
+      background: #1a2233; color: #9eb0c8; border: 1px solid #263348;
+    }
+    .badge.login { color: #7be0c8; border-color: rgba(49,211,178,.3); }
+    .play {
+      width: 30px; height: 30px; border-radius: 8px; border: 0;
+      background: #6d5dfc; color: white; font-size: 12px;
+    }
+    .foot { color: #6d7f99; font-size: 11px; text-align: center; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <section class="browser">
+    <div class="chrome-bar">
+      <div class="dots"><i></i><i></i><i></i></div>
+      <div class="url">https://portal.example.com/login</div>
+    </div>
+    <div class="page-card">
+      <h2>企业门户登录</h2>
+      <p>在任意办公站点上录制真实操作，一键交给本机 Runtime 回放。</p>
+      <div class="fake-form">
+        <label>账号<input value="eminoda" readonly /></label>
+        <label>密码<input type="password" value="********" readonly /></label>
+        <button type="button">登录</button>
+      </div>
+      <p class="caption">密码字段不会写入明文，仅保存本地 credential 占位。</p>
+    </div>
+  </section>
+  <aside class="panel">
+    <div class="brand">
+      <div class="mark">W</div>
+      <h1>Work Copilot</h1>
+    </div>
+    <div class="tags"><span class="tag"><i class="dot"></i>已连接</span></div>
+    <div class="dock">
+      <div class="tile"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/></svg>录制</div>
+      <div class="tile"><svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4a2 2 0 0 0 2 2zm6-6V11c0-3.07-1.64-5.64-4.5-6.32V4a1.5 1.5 0 0 0-3 0v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>通知</div>
+      <div class="tile"><svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14l4-4h12c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z"/></svg>日报</div>
+      <div class="tile"><svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/></svg>聊天</div>
+    </div>
+    <div class="wf">
+      <h3>工作流</h3>
+      <div class="item">
+        <div>
+          <strong>门户登录</strong>
+          <div class="badges"><span class="badge login">登录</span></div>
+        </div>
+        <button class="play" type="button">▶</button>
+      </div>
+      <div class="item">
+        <div>
+          <strong>打开禅道 · 我的 Bug</strong>
+          <div class="badges"><span class="badge">应用</span><span class="badge">前置 · 门户登录</span></div>
+        </div>
+        <button class="play" type="button">▶</button>
+      </div>
+      <div class="item">
+        <div>
+          <strong>邮箱未读摘要</strong>
+          <div class="badges"><span class="badge">应用</span></div>
+        </div>
+        <button class="play" type="button">▶</button>
+      </div>
+    </div>
+    <p class="foot">Side Panel · 本机 Runtime 127.0.0.1:4317</p>
+  </aside>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>WorkCopilot — Chat & Settings</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 1280px; height: 800px; overflow: hidden;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #070b14; color: #e8eef7;
+      display: grid; grid-template-columns: 1fr 1fr;
+    }
+    .col {
+      padding: 36px 40px; display: grid; gap: 16px; align-content: start;
+      border-right: 1px solid #1c2740;
+    }
+    .col:last-child { border-right: 0; }
+    .label { font-size: 12px; letter-spacing: .14em; color: #6d5dfc; font-weight: 800; }
+    h2 { font-size: 26px; }
+    .sub { color: #8fa0b8; font-size: 14px; line-height: 1.5; margin-bottom: 8px; }
+    .phone {
+      background: #0c111b; border: 1px solid #263348; border-radius: 16px;
+      padding: 16px; min-height: 560px; display: grid; grid-template-rows: auto 1fr auto; gap: 12px;
+    }
+    .top { display: flex; align-items: center; gap: 10px; }
+    .icon-btn {
+      width: 34px; height: 34px; border-radius: 9px; border: 1px solid #34445c;
+      background: #202d42; display: grid; place-items: center; color: #c5d0e0;
+    }
+    .msgs { display: grid; gap: 10px; align-content: start; overflow: hidden; }
+    .bubble {
+      max-width: 88%; padding: 10px 12px; border-radius: 12px; font-size: 13px; line-height: 1.45;
+    }
+    .me { justify-self: end; background: #6d5dfc; }
+    .bot { justify-self: start; background: #121a28; border: 1px solid #263348; color: #c5d0e0; }
+    .composer {
+      display: flex; gap: 8px; border-top: 1px solid #1c2740; padding-top: 12px;
+    }
+    .composer input {
+      flex: 1; border: 1px solid #34445c; background: #0c111b; color: #e8eef7;
+      border-radius: 10px; padding: 10px 12px;
+    }
+    .composer button {
+      border: 0; border-radius: 10px; padding: 0 14px; background: #6d5dfc; color: #fff; font-weight: 700;
+    }
+    .form { display: grid; gap: 12px; }
+    .field { display: grid; gap: 6px; font-size: 12px; color: #8fa0b8; }
+    .field input, .field textarea {
+      border: 1px solid #34445c; background: #0c111b; color: #e8eef7;
+      border-radius: 10px; padding: 10px 12px;
+    }
+    .field textarea { min-height: 72px; resize: none; }
+    .btn {
+      border: 0; border-radius: 10px; padding: 11px 14px; background: #6d5dfc;
+      color: #fff; font-weight: 700; width: fit-content;
+    }
+    .hint { font-size: 12px; color: #6d7f99; line-height: 1.45; }
+    .ok {
+      display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; width: fit-content;
+      border-radius: 999px; font-size: 12px; font-weight: 600;
+      background: rgba(49,211,178,.12); color: #7be0c8; border: 1px solid rgba(49,211,178,.28);
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  </style>
+</head>
+<body>
+  <section class="col">
+    <div class="label">CHAT</div>
+    <h2>侧边栏对话</h2>
+    <p class="sub">连接本地 OpenAI 兼容模型。能力经 Skill / 工具落地，不直接执行任意脚本。</p>
+    <div class="phone">
+      <div class="top"><div class="icon-btn">←</div><strong>聊天</strong></div>
+      <div class="msgs">
+        <div class="bubble me">总结一下今天的日报重点</div>
+        <div class="bubble bot">今日重点：Desktop 四模块管理台已落地；扩展侧日报 AI 与用量统计可用。需要我打开日报页吗？</div>
+        <div class="bubble me">打开录制页</div>
+        <div class="bubble bot">可以。确认后将切换到「录制」模块。</div>
+      </div>
+      <div class="composer">
+        <input value="帮我列一下未读通知" readonly />
+        <button type="button">发送</button>
+      </div>
+    </div>
+  </section>
+  <section class="col">
+    <div class="label">SETTINGS</div>
+    <h2>连接本机 Runtime</h2>
+    <p class="sub">粘贴 Desktop 生成的 runtime token。扫描目录与模型配置同步到本地 AI Runtime。</p>
+    <div class="phone">
+      <div class="top"><div class="icon-btn">←</div><strong>设置</strong></div>
+      <span class="ok"><i class="dot"></i>Runtime online</span>
+      <div class="form">
+        <label class="field">Runtime token
+          <input type="password" value="••••••••••••••••" readonly />
+        </label>
+        <label class="field">Git 扫描目录
+          <textarea readonly>D:\coding
+D:\work\repos</textarea>
+        </label>
+        <label class="field">模型
+          <input value="deepseek-v4-flash · https://api.deepseek.com" readonly />
+        </label>
+        <button class="btn" type="button">立即扫描近 7 天</button>
+        <p class="hint">凭证与 Cookie 仅保存在本机 ~/.workcopilot/credentials/，不上传云端。</p>
+      </div>
+    </div>
+  </section>
+</body>
+</html>

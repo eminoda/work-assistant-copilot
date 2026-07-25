@@ -13,5 +13,15 @@
     "windows": [{ "title": "WorkCopilot", "width": 1180, "height": 760, "minWidth": 860, "minHeight": 600 }],
     "security": { "csp": "default-src 'self'; connect-src http://127.0.0.1:4317; img-src 'self' asset: data:" }
   },
-  "bundle": { "active": false }
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
 }
