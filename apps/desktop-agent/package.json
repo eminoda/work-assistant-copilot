@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "tauri": "tauri dev",
-    "tauri:build": "tauri build",
+    "tauri": "tauri",
     "build": "vue-tsc --noEmit && vite build",
     "typecheck": "vue-tsc --noEmit",
     "lint": "vue-tsc --noEmit",

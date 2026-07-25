@@ -78,6 +78,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: apps/desktop-agent
+          # Bypass package.json scripts so `tauri build` is not rewritten to `tauri dev`.
+          tauriScript: pnpm exec tauri
           tagName: desktop-v__VERSION__
           releaseName: 'WorkCopilot Desktop v__VERSION__'
           releaseBody: |

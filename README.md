@@ -89,7 +89,7 @@ pnpm exec playwright install chromium
 **桌面端（推荐，会拉起 Runtime）：**
 
 ```powershell
-pnpm --filter @workcopilot/desktop-agent tauri
+pnpm --filter @workcopilot/desktop-agent tauri dev
 ```
 
 **仅 Runtime：**
