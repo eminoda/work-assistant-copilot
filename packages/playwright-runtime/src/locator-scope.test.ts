@@ -47,4 +47,31 @@ describe('parent-scoped locators', () => {
 
     await browser.close()
   })
+
+  it('matches text whether DOM encodes ampersand as & or &amp;', async () => {
+    const browser = await chromium.launch({ headless: true })
+    const page = await browser.newPage()
+    await page.setContent(`
+      <div class="summary-warp">
+        <div class="summary">
+          <span class="summary-content">Re:前端 co&amp;bms 证书补办-提测</span>
+        </div>
+      </div>
+    `)
+
+    const runtime = new PlaywrightRuntime()
+    const leaf = runtime.locator(page, {
+      text: 'Re:前端 co&bms 证书补办-提测',
+      css: 'span.summary-content',
+      confidence: 0.9,
+      parents: [
+        { tag: 'div', css: 'div.summary' },
+        { tag: 'div', css: 'div.summary-warp' },
+      ],
+    })
+    expect(await leaf.count()).toBe(1)
+    expect(await leaf.innerText()).toContain('co&bms')
+
+    await browser.close()
+  })
 })

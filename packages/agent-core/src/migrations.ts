@@ -56,4 +56,30 @@ export const initialSchemaStatements = [
   `CREATE UNIQUE INDEX IF NOT EXISTS "Project_path_key" ON "Project"("path")`,
   `CREATE INDEX IF NOT EXISTS "DailyMemory_date_idx" ON "DailyMemory"("date")`,
   `CREATE INDEX IF NOT EXISTS "Report_type_startDate_endDate_idx" ON "Report"("type", "startDate", "endDate")`,
+  `CREATE TABLE IF NOT EXISTS "NotifyMessage" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "title" TEXT NOT NULL,
+    "tag" TEXT NOT NULL DEFAULT 'workflow',
+    "label" TEXT NOT NULL DEFAULT '',
+    "value" TEXT NOT NULL DEFAULT '',
+    "previousValue" TEXT,
+    "workflowId" TEXT,
+    "unread" BOOLEAN NOT NULL DEFAULT 0,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS "NotifySchedule" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "workflowId" TEXT NOT NULL,
+    "intervalMinutes" INTEGER NOT NULL DEFAULT 60,
+    "enabled" BOOLEAN NOT NULL DEFAULT 1,
+    "lastRunAt" DATETIME,
+    "nextRunAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE INDEX IF NOT EXISTS "NotifyMessage_updatedAt_idx" ON "NotifyMessage"("updatedAt")`,
+  `CREATE INDEX IF NOT EXISTS "NotifyMessage_unread_idx" ON "NotifyMessage"("unread")`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS "NotifyMessage_workflow_label_key" ON "NotifyMessage"("workflowId", "label")`,
+  `CREATE INDEX IF NOT EXISTS "NotifySchedule_nextRunAt_idx" ON "NotifySchedule"("nextRunAt")`,
 ] as const

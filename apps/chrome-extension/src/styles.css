@@ -83,7 +83,22 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   display: grid; place-items: center;
 }
 .action-record { background: rgba(200, 72, 92, 0.18); color: #ff6b7d; }
-.action-notify { background: rgba(49, 211, 178, 0.16); color: #31d3b2; }
+.action-notify { background: rgba(49, 211, 178, 0.16); color: #31d3b2; position: relative; }
+.action-notify .badge-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
 .action-chat { background: rgba(109, 93, 252, 0.18); color: #9b8dff; }
 .action-label { font-size: 12px; font-weight: 650; color: #c5d0e0; }
 
@@ -127,6 +142,13 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .workflow-time { color: #8a9bb3; }
 .actions { display: flex; gap: 6px; flex: 0 0 auto; }
 .play-btn { color: #7be0c8; }
+.link-btn { color: #9bb0cc; }
+.link-btn-on {
+  color: #9b8dff;
+  border-color: rgba(155, 141, 255, 0.45);
+  background: rgba(155, 141, 255, 0.1);
+}
+.workflow-prereq { color: #9b8dff; }
 .play-btn-running {
   color: #7be0c8;
   border-color: rgba(123, 224, 200, 0.45);
@@ -299,6 +321,31 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
 }
 .footer-btn { width: 100%; padding: 12px; }
+
+.notify-tabs {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+}
+.notify-tabs button {
+  padding: 7px 10px; border-radius: 10px; background: #121a28; border: 1px solid #263348; color: #c5d0e0;
+}
+.notify-tabs button[data-on="true"] {
+  border-color: rgba(49, 211, 178, 0.5); color: #7be0c8; background: rgba(49, 211, 178, 0.1);
+}
+.notify-item {
+  display: grid; gap: 4px; padding: 12px; border-radius: 12px;
+  background: #121a28; border: 1px solid #263348; margin-bottom: 8px; cursor: pointer;
+}
+.notify-item[data-unread="true"] {
+  border-color: rgba(109, 93, 252, 0.55);
+  box-shadow: inset 3px 0 0 #6d5dfc;
+}
+.notify-item-head { display: flex; align-items: center; gap: 8px; }
+.notify-label { color: #8a9bb3; }
+.notify-value {
+  margin: 4px 0 0; color: #e8eef7; font-size: 13px; line-height: 1.45;
+  white-space: pre-wrap; word-break: break-word;
+}
+.schedule-form { gap: 10px; margin-bottom: 12px; }
 
 .confirm-mask {
   position: fixed; inset: 0; z-index: 40;

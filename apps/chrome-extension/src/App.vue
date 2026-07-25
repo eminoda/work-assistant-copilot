@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, shallowRef } from 'vue'
 import type { RecordingEvent } from '@workcopilot/browser-recorder'
+import { firstEventUrl } from './workflowLink'
 import StatusTags from './components/StatusTags.vue'
 import ActionDock from './components/ActionDock.vue'
 import WorkflowList from './components/WorkflowList.vue'
@@ -10,6 +11,8 @@ import ComingSoonView from './components/ComingSoonView.vue'
 import RecordingView from './components/RecordingView.vue'
 import WorkflowDetailView from './components/WorkflowDetailView.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import NotifyView from './components/NotifyView.vue'
+import type { NotifyMessage, NotifySchedule } from './components/NotifyView.vue'
 import { useRuntime } from './composables/useRuntime'
 import type { RecorderState } from './types'
 import type { WorkflowSummary } from './workflowTypes'
@@ -36,15 +39,26 @@ const runningWorkflowIds = shallowRef<string[]>([])
 const executionIdsByWorkflow = shallowRef<Record<string, string>>({})
 const pendingStopIds = shallowRef<string[]>([])
 const stoppedWorkflowIds = shallowRef<string[]>([])
+const notifyMessages = shallowRef<NotifyMessage[]>([])
+const notifySchedules = shallowRef<NotifySchedule[]>([])
+const notifyLoading = shallowRef(false)
+const unreadCount = shallowRef(0)
 const runtime = useRuntime()
 
 let timerStartedAt = 0
 let elapsedOffset = 0
 let timerId: ReturnType<typeof setInterval> | undefined
+let unreadTimer: ReturnType<typeof setInterval> | undefined
 
 const connected = computed(() => {
   const status = runtime.status.value.toLowerCase()
   return status.includes('connect') || status === 'ready' || status === 'ok'
+})
+
+const detailPrerequisiteName = computed(() => {
+  const id = detailWorkflow.value?.prerequisiteWorkflowId
+  if (!id) return ''
+  return runtime.workflows.value.find((item) => item.id === id)?.name || id
 })
 
 function applyState(state: RecorderState) {
@@ -135,9 +149,14 @@ async function startRecording() {
   message.value = '正在录制…'
 }
 
-async function persist(list: RecordingEvent[], name: string, kind: 'login' | 'app') {
+async function persist(
+  list: RecordingEvent[],
+  name: string,
+  kind: 'login' | 'app',
+  prerequisiteWorkflowId?: string,
+) {
   const sanitized = await storeSessionCookies(list)
-  await runtime.saveRecording(name, sanitized, kind)
+  await runtime.saveRecording(name, sanitized, kind, prerequisiteWorkflowId)
   events.value = sanitized
   resetPending()
   message.value = `已保存：${name}（${kind === 'login' ? '登录' : '应用'}）`
@@ -210,13 +229,14 @@ async function toggleExtractArm() {
     armed: !extractArmed.value,
   }) as RecorderState
   applyState(state)
-  message.value = state.extractArmed ? '请在页面上拖选要提取的文字' : ''
+  message.value = state.extractArmed ? '请在页面上点击要抓取的元素（悬停有绿色闪烁边框）' : ''
 }
 
 async function acceptSave(payload: {
   name: string
   kind: 'login' | 'app'
   credentials: Record<string, string>
+  prerequisiteWorkflowId?: string
 }) {
   const list = pendingEvents.value
   if (!list?.length) {
@@ -230,11 +250,38 @@ async function acceptSave(payload: {
     for (const [key, value] of Object.entries(payload.credentials)) {
       await runtime.saveCredential(key, value)
     }
-    await persist(list, payload.name, payload.kind)
+    await persist(list, payload.name, payload.kind, payload.prerequisiteWorkflowId)
   } catch (error) {
     saveError.value = error instanceof Error ? error.message : '保存失败'
   } finally {
     saving.value = false
+  }
+}
+
+async function setWorkflowPrerequisite(payload: {
+  id: string
+  prerequisiteWorkflowId: string | null
+}) {
+  try {
+    await runtime.setPrerequisiteWorkflow(payload.id, payload.prerequisiteWorkflowId)
+    message.value = payload.prerequisiteWorkflowId ? '已关联前置工作流' : '已取消前置关联'
+    if (detailWorkflow.value?.id === payload.id) {
+      detailWorkflow.value = await runtime.getWorkflow(payload.id)
+    }
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : '关联失败'
+  }
+}
+
+async function renameWorkflow(payload: { id: string; name: string }) {
+  try {
+    await runtime.renameWorkflow(payload.id, payload.name)
+    message.value = `已重命名为「${payload.name}」`
+    if (detailWorkflow.value?.id === payload.id) {
+      detailWorkflow.value = await runtime.getWorkflow(payload.id)
+    }
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : '重命名失败'
   }
 }
 
@@ -281,6 +328,7 @@ async function execute(id: string) {
           ? '已停止'
           : `执行结束：${status}${finished.error ? ` — ${finished.error}` : ''}`
     }
+    void refreshUnread()
   } catch (error) {
     message.value = error instanceof Error ? error.message : '执行失败'
   } finally {
@@ -378,19 +426,83 @@ function onRuntimeMessage(message: RecorderState & { type?: string }) {
   }
 }
 
+async function refreshUnread() {
+  if (!runtime.token.value.trim()) {
+    unreadCount.value = 0
+    return
+  }
+  try {
+    unreadCount.value = await runtime.unreadMessageCount()
+  } catch {
+    // runtime may be offline
+  }
+}
+
+async function refreshNotifyCenter() {
+  notifyLoading.value = true
+  try {
+    const [messages, schedules] = await Promise.all([
+      runtime.listMessages(),
+      runtime.listSchedules(),
+    ])
+    notifyMessages.value = messages
+    notifySchedules.value = schedules
+    unreadCount.value = messages.filter((item) => item.unread).length
+  } catch (error) {
+    message.value = error instanceof Error ? error.message : '加载消息中心失败'
+  } finally {
+    notifyLoading.value = false
+  }
+}
+
+async function openNotify() {
+  view.value = 'notify'
+  await refreshNotifyCenter()
+}
+
+async function markNotifyRead(id: string) {
+  await runtime.markMessageRead(id)
+  await refreshNotifyCenter()
+}
+
+async function markAllNotifyRead() {
+  await runtime.markAllMessagesRead()
+  await refreshNotifyCenter()
+}
+
+async function createNotifySchedule(payload: { workflowId: string; intervalMinutes: number }) {
+  await runtime.createSchedule(payload)
+  await refreshNotifyCenter()
+  message.value = '已添加定时任务'
+}
+
+async function toggleNotifySchedule(payload: { id: string; enabled: boolean }) {
+  await runtime.setScheduleEnabled(payload.id, payload.enabled)
+  await refreshNotifyCenter()
+}
+
+async function removeNotifySchedule(id: string) {
+  await runtime.deleteSchedule(id)
+  await refreshNotifyCenter()
+}
+
 onMounted(() => {
   chrome.runtime.onMessage.addListener(onRuntimeMessage)
   const saved = runtime.token.value.trim()
   if (saved) {
-    void runtime.connect(saved).catch((error) => {
+    void runtime.connect(saved).then(() => refreshUnread()).catch((error) => {
       message.value = error instanceof Error ? error.message : '自动连接 Runtime 失败'
     })
   }
+  unreadTimer = setInterval(() => {
+    if (view.value === 'home' || view.value === 'notify') void refreshUnread()
+  }, 8_000)
 })
 
 onUnmounted(() => {
   chrome.runtime.onMessage.removeListener(onRuntimeMessage)
   stopTimer()
+  if (unreadTimer) clearInterval(unreadTimer)
 })
 </script>
 
@@ -428,12 +540,21 @@ onUnmounted(() => {
       @back="view = 'home'"
     />
 
-    <ComingSoonView
+    <NotifyView
       v-else-if="view === 'notify'"
-      title="通知"
-      description="消息通知与定时策略即将上线，敬请期待。"
+      :messages="notifyMessages"
+      :schedules="notifySchedules"
+      :workflows="[...runtime.workflows.value]"
+      :loading="notifyLoading"
       @back="leaveSecondary"
       @close="leaveSecondary"
+      @refresh="refreshNotifyCenter"
+      @read="markNotifyRead"
+      @read-all="markAllNotifyRead"
+      @create-schedule="createNotifySchedule"
+      @toggle-schedule="toggleNotifySchedule"
+      @remove-schedule="removeNotifySchedule"
+      @run-workflow="execute"
     />
 
     <ComingSoonView
@@ -448,12 +569,14 @@ onUnmounted(() => {
       <WorkflowDetailView
         v-if="detailWorkflow || detailLoading || detailError"
         :workflow="detailWorkflow || { id: '', name: '…', intent: '' }"
+        :prerequisite-name="detailPrerequisiteName"
         :loading="detailLoading"
         :error="detailError"
         @back="leaveSecondary"
         @close="leaveSecondary"
         @execute="execute"
         @remove="askRemoveFromDetail"
+        @rename="renameWorkflow"
       />
       <ConfirmDialog
         v-if="detailDeleteId && detailWorkflow"
@@ -487,6 +610,8 @@ onUnmounted(() => {
         :credential-keys="credentialKeys"
         :error="saveError"
         :saving="saving"
+        :workflows="([...runtime.workflows.value] as WorkflowSummary[])"
+        :entry-url="pendingEvents ? (firstEventUrl(pendingEvents) || '') : ''"
         @save="acceptSave"
         @cancel="discardNaming"
       />
@@ -496,12 +621,13 @@ onUnmounted(() => {
       <StatusTags :connected="connected" :recording="active" />
       <ActionDock
         :recording="active"
+        :unread-count="unreadCount"
         @record="openRecording"
-        @notify="view = 'notify'"
+        @notify="openNotify"
         @chat="view = 'chat'"
       />
       <WorkflowList
-        :workflows="[...runtime.workflows.value]"
+        :workflows="([...runtime.workflows.value] as WorkflowSummary[])"
         :running-ids="runningWorkflowIds"
         @execute="execute"
         @stop="stopExecution"
@@ -509,6 +635,8 @@ onUnmounted(() => {
         @remove-all="removeAllWorkflows"
         @create="openRecording"
         @open="openWorkflowDetail"
+        @set-prerequisite="setWorkflowPrerequisite"
+        @rename="renameWorkflow"
       />
       <p v-if="message" class="notice">{{ message }}</p>
     </template>

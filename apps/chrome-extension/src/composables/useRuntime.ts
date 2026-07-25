@@ -51,6 +51,7 @@ export function useRuntime() {
     name: string,
     events: RecordingEvent[],
     kind: 'login' | 'app' = 'app',
+    prerequisiteWorkflowId?: string,
   ) {
     await request('/api/recordings', {
       method: 'POST',
@@ -59,7 +60,24 @@ export function useRuntime() {
         kind,
         intent: kind === 'login' ? 'browser.login' : 'browser.app',
         events,
+        ...(prerequisiteWorkflowId ? { prerequisiteWorkflowId } : {}),
       }),
+    })
+    workflows.value = await request('/api/workflows')
+  }
+
+  async function setPrerequisiteWorkflow(id: string, prerequisiteWorkflowId: string | null) {
+    await request(`/api/workflows/${encodeURIComponent(id)}/prerequisite`, {
+      method: 'PUT',
+      body: JSON.stringify({ prerequisiteWorkflowId }),
+    })
+    workflows.value = await request('/api/workflows')
+  }
+
+  async function renameWorkflow(id: string, name: string) {
+    await request(`/api/workflows/${encodeURIComponent(id)}/name`, {
+      method: 'PUT',
+      body: JSON.stringify({ name }),
     })
     workflows.value = await request('/api/workflows')
   }
@@ -137,6 +155,63 @@ export function useRuntime() {
     workflows.value = await request('/api/workflows')
   }
 
+  async function listMessages() {
+    return request('/api/messages') as Promise<Array<{
+      id: string
+      title: string
+      tag: string
+      label: string
+      value: string
+      previousValue?: string | null
+      workflowId?: string | null
+      unread: boolean
+      updatedAt: string
+      createdAt: string
+    }>>
+  }
+
+  async function unreadMessageCount() {
+    const result = await request('/api/messages/unread-count') as { count: number }
+    return Number(result.count || 0)
+  }
+
+  async function markMessageRead(id: string) {
+    await request(`/api/messages/${encodeURIComponent(id)}/read`, { method: 'POST' })
+  }
+
+  async function markAllMessagesRead() {
+    await request('/api/messages/read-all', { method: 'POST' })
+  }
+
+  async function listSchedules() {
+    return request('/api/schedules') as Promise<Array<{
+      id: string
+      workflowId: string
+      intervalMinutes: number
+      enabled: boolean
+      nextRunAt?: string | null
+      lastRunAt?: string | null
+    }>>
+  }
+
+  async function createSchedule(input: { workflowId: string; intervalMinutes: number }) {
+    return request('/api/schedules', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  }
+
+  async function setScheduleEnabled(id: string, enabled: boolean) {
+    await request(`/api/schedules/${encodeURIComponent(id)}/enabled`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    })
+  }
+
+  async function deleteSchedule(id: string) {
+    await request(`/api/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  }
+
   return {
     token,
     workflows: readonly(workflows),
@@ -144,11 +219,21 @@ export function useRuntime() {
     connect,
     saveCredential,
     saveRecording,
+    setPrerequisiteWorkflow,
+    renameWorkflow,
     getWorkflow,
     execute,
     cancelExecution,
     waitForExecution,
     deleteWorkflow,
     deleteAllWorkflows,
+    listMessages,
+    unreadMessageCount,
+    markMessageRead,
+    markAllMessagesRead,
+    listSchedules,
+    createSchedule,
+    setScheduleEnabled,
+    deleteSchedule,
   }
 }

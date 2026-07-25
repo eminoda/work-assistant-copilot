@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, shallowRef } from 'vue'
 import SubPageHeader from './SubPageHeader.vue'
 import { formatWorkflowTime, type WorkflowSummary } from '../workflowTypes'
 
 const props = defineProps<{
   workflow: WorkflowSummary
+  prerequisiteName?: string
   loading?: boolean
   error?: string
 }>()
@@ -14,12 +15,38 @@ const emit = defineEmits<{
   close: []
   execute: [id: string]
   remove: [id: string]
+  rename: [payload: { id: string; name: string }]
 }>()
+
+const renaming = shallowRef(false)
+const renameName = shallowRef('')
+const renameError = shallowRef('')
 
 const kindLabel = computed(() => {
   if (props.workflow.kind === 'login' || props.workflow.intent?.includes('login')) return '登录'
   return '应用'
 })
+
+function startRename() {
+  renameName.value = props.workflow.name
+  renameError.value = ''
+  renaming.value = true
+}
+
+function cancelRename() {
+  renaming.value = false
+  renameError.value = ''
+}
+
+function confirmRename() {
+  const next = renameName.value.trim()
+  if (!next) {
+    renameError.value = '名称不能为空'
+    return
+  }
+  emit('rename', { id: props.workflow.id, name: next })
+  renaming.value = false
+}
 
 function stepTitle(tool: string) {
   switch (tool) {
@@ -105,6 +132,10 @@ function stepDetail(step: NonNullable<WorkflowSummary['steps']>[number]) {
             <dt>主页</dt>
             <dd class="break">{{ workflow.homeUrl }}</dd>
           </div>
+          <div v-if="workflow.prerequisiteWorkflowId">
+            <dt>前置工作流</dt>
+            <dd>{{ prerequisiteName || workflow.prerequisiteWorkflowId }}</dd>
+          </div>
           <div v-if="formatWorkflowTime(workflow.createdAt)">
             <dt>创建时间</dt>
             <dd>{{ formatWorkflowTime(workflow.createdAt) }}</dd>
@@ -119,9 +150,31 @@ function stepDetail(step: NonNullable<WorkflowSummary['steps']>[number]) {
           </div>
         </dl>
         <div class="row">
+          <button class="secondary" type="button" @click="startRename">重命名</button>
           <button class="secondary" type="button" @click="emit('remove', workflow.id)">删除</button>
           <button type="button" @click="emit('execute', workflow.id)">运行</button>
         </div>
+      </div>
+
+      <div v-if="renaming" class="confirm-mask" role="dialog" aria-modal="true" @click.self="cancelRename">
+        <section class="card rename-dialog">
+          <strong>重命名工作流</strong>
+          <label class="field">
+            名称
+            <input
+              v-model="renameName"
+              type="text"
+              autocomplete="off"
+              autofocus
+              @keydown.enter.prevent="confirmRename"
+            />
+          </label>
+          <p v-if="renameError" class="error">{{ renameError }}</p>
+          <div class="row">
+            <button class="secondary" type="button" @click="cancelRename">取消</button>
+            <button type="button" :disabled="!renameName.trim()" @click="confirmRename">保存</button>
+          </div>
+        </section>
       </div>
 
       <section class="detail-steps">

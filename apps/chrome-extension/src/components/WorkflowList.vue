@@ -1,18 +1,11 @@
 <script setup lang="ts">
-import { shallowRef } from 'vue'
+import { computed, shallowRef } from 'vue'
+import { canLinkPrerequisite, workflowExitUrl } from '../workflowLink'
 import ConfirmDialog from './ConfirmDialog.vue'
-import { formatWorkflowTime } from '../workflowTypes'
+import { formatWorkflowTime, type WorkflowSummary } from '../workflowTypes'
 
 const props = defineProps<{
-  workflows: Array<{
-    id: string
-    name: string
-    intent: string
-    kind?: string
-    homeUrl?: string
-    createdAt?: string
-    updatedAt?: string
-  }>
+  workflows: WorkflowSummary[]
   runningIds?: string[]
 }>()
 const emit = defineEmits<{
@@ -22,9 +15,16 @@ const emit = defineEmits<{
   removeAll: []
   create: []
   open: [id: string]
+  setPrerequisite: [payload: { id: string; prerequisiteWorkflowId: string | null }]
+  rename: [payload: { id: string; name: string }]
 }>()
 
 const pending = shallowRef<null | { mode: 'one'; id: string; name: string } | { mode: 'all'; count: number }>(null)
+const linkTarget = shallowRef<WorkflowSummary | null>(null)
+const linkSelection = shallowRef('')
+const renameTarget = shallowRef<WorkflowSummary | null>(null)
+const renameName = shallowRef('')
+const renameError = shallowRef('')
 
 function kindLabel(kind?: string, intent?: string) {
   if (kind === 'login' || intent?.includes('login')) return '登录'
@@ -38,6 +38,78 @@ function timeLabel(workflow: { createdAt?: string; updatedAt?: string }) {
 
 function isRunning(id: string) {
   return Boolean(props.runningIds?.includes(id))
+}
+
+function prerequisiteName(id?: string) {
+  if (!id) return ''
+  return props.workflows.find((item) => item.id === id)?.name || '已关联'
+}
+
+function asWorkflowShape(workflow: WorkflowSummary) {
+  return {
+    homeUrl: workflow.homeUrl,
+    steps: (workflow.steps || []).map((step) => ({
+      id: step.id,
+      tool: step.tool,
+      params: { ...step.params },
+      timeoutMs: 30_000,
+      retries: 0,
+      requiresConfirmation: false,
+    })),
+  }
+}
+
+const linkCandidates = computed(() => {
+  const current = linkTarget.value
+  if (!current) return []
+  return props.workflows.filter((item) => {
+    if (item.id === current.id) return false
+    return canLinkPrerequisite(asWorkflowShape(item), asWorkflowShape(current))
+  })
+})
+
+function openLinkDialog(workflow: WorkflowSummary) {
+  linkTarget.value = workflow
+  linkSelection.value = workflow.prerequisiteWorkflowId || ''
+}
+
+function dismissLink() {
+  linkTarget.value = null
+  linkSelection.value = ''
+}
+
+function confirmLink() {
+  const current = linkTarget.value
+  if (!current) return
+  emit('setPrerequisite', {
+    id: current.id,
+    prerequisiteWorkflowId: linkSelection.value || null,
+  })
+  dismissLink()
+}
+
+function openRenameDialog(workflow: WorkflowSummary) {
+  renameTarget.value = workflow
+  renameName.value = workflow.name
+  renameError.value = ''
+}
+
+function dismissRename() {
+  renameTarget.value = null
+  renameName.value = ''
+  renameError.value = ''
+}
+
+function confirmRename() {
+  const current = renameTarget.value
+  const next = renameName.value.trim()
+  if (!current) return
+  if (!next) {
+    renameError.value = '名称不能为空'
+    return
+  }
+  emit('rename', { id: current.id, name: next })
+  dismissRename()
 }
 
 function askRemoveOne(id: string, name: string) {
@@ -59,6 +131,10 @@ function confirmPending() {
   if (!current) return
   if (current.mode === 'one') emit('remove', current.id)
   else emit('removeAll')
+}
+
+function candidateHint(workflow: WorkflowSummary) {
+  return workflowExitUrl(asWorkflowShape(workflow)) || workflow.homeUrl || ''
 }
 </script>
 
@@ -97,10 +173,44 @@ function confirmPending() {
             <b>{{ workflow.name }}</b>
             <span class="kind-badge">{{ kindLabel(workflow.kind, workflow.intent) }}</span>
           </div>
+          <small v-if="workflow.prerequisiteWorkflowId" class="workflow-prereq">
+            前置：{{ prerequisiteName(workflow.prerequisiteWorkflowId) }}
+          </small>
           <small v-if="timeLabel(workflow)" class="workflow-time">{{ timeLabel(workflow) }}</small>
           <small>{{ workflow.homeUrl || workflow.intent }}</small>
         </div>
         <div class="actions" @click.stop>
+          <button
+            class="icon-btn"
+            type="button"
+            title="重命名"
+            aria-label="重命名"
+            :disabled="isRunning(workflow.id)"
+            @click="openRenameDialog(workflow)"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M4 17.2V20h2.8l8.3-8.3-2.8-2.8L4 17.2zm14.7-8.5c.3-.3.3-.8 0-1.1l-1.3-1.3a.8.8 0 0 0-1.1 0l-1 1 2.8 2.8 1.1-1.4z"
+              />
+            </svg>
+          </button>
+          <button
+            class="icon-btn link-btn"
+            :class="{ 'link-btn-on': Boolean(workflow.prerequisiteWorkflowId) }"
+            type="button"
+            :title="workflow.prerequisiteWorkflowId ? '修改前置工作流' : '关联前置工作流'"
+            :aria-label="workflow.prerequisiteWorkflowId ? '修改前置工作流' : '关联前置工作流'"
+            :disabled="isRunning(workflow.id)"
+            @click="openLinkDialog(workflow)"
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M17 7h-3V5h3a5 5 0 0 1 0 10h-3v-2h3a3 3 0 0 0 0-6zM10 17H7a5 5 0 0 1 0-10h3v2H7a3 3 0 0 0 0 6h3v2zm-1-6h6v2H9v-2z"
+              />
+            </svg>
+          </button>
           <button
             class="icon-btn play-btn"
             :class="{ 'play-btn-running': isRunning(workflow.id) }"
@@ -171,5 +281,47 @@ function confirmPending() {
       @cancel="dismiss"
       @confirm="confirmPending"
     />
+
+    <div v-if="linkTarget" class="confirm-mask" role="dialog" aria-modal="true" @click.self="dismissLink">
+      <section class="card rename-dialog">
+        <strong>关联前置工作流</strong>
+        <p class="hint">仅显示末路径与「{{ linkTarget.name }}」首路径相同的工作流。执行时会先跑前置任务。</p>
+        <label class="field">
+          前置工作流
+          <select v-model="linkSelection" class="select">
+            <option value="">无（不关联）</option>
+            <option v-for="item in linkCandidates" :key="item.id" :value="item.id">
+              {{ item.name }}{{ candidateHint(item) ? ` · ${candidateHint(item)}` : '' }}
+            </option>
+          </select>
+        </label>
+        <p v-if="linkCandidates.length === 0" class="muted">暂无路径匹配的可关联工作流。</p>
+        <div class="row">
+          <button class="secondary" type="button" @click="dismissLink">取消</button>
+          <button type="button" @click="confirmLink">保存</button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="renameTarget" class="confirm-mask" role="dialog" aria-modal="true" @click.self="dismissRename">
+      <section class="card rename-dialog">
+        <strong>重命名工作流</strong>
+        <label class="field">
+          名称
+          <input
+            v-model="renameName"
+            type="text"
+            autocomplete="off"
+            autofocus
+            @keydown.enter.prevent="confirmRename"
+          />
+        </label>
+        <p v-if="renameError" class="error">{{ renameError }}</p>
+        <div class="row">
+          <button class="secondary" type="button" @click="dismissRename">取消</button>
+          <button type="button" :disabled="!renameName.trim()" @click="confirmRename">保存</button>
+        </div>
+      </section>
+    </div>
   </section>
 </template>

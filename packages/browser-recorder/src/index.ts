@@ -1,6 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { selectorSchema, workflowSchema, type Workflow, type WorkflowStep } from '@workcopilot/workflow-engine'
+import {
+  compactSelectorText,
+  selectorSchema,
+  workflowSchema,
+  type Workflow,
+  type WorkflowStep,
+} from '@workcopilot/workflow-engine'
+
+export { compactSelectorText, decodeHtmlEntities, flexibleTextRegex, normalizeMatchText } from '@workcopilot/workflow-engine'
 
 export const elementSnapshotSchema = z.object({
   tag: z.string(),
@@ -58,6 +66,17 @@ export const recordingEventSchema = z.object({
   /** Named text capture for notification monitoring. */
   extractLabel: z.string().optional(),
   extractText: z.string().optional(),
+  /**
+   * How a navigation/tab was caused:
+   * - user: typed URL / explicit open (replay as browser.open)
+   * - click: immediate result of a recorded click/submit (bound to that click; not replayed as open)
+   * - redirect: follow-up 302 / multi-hop after click (logged only; not replayed)
+   */
+  navCause: z.enum(['user', 'click', 'redirect']).optional(),
+  /** For click/submit: first destination URL (same tab or _blank). */
+  resultUrl: z.string().url().optional(),
+  /** For click/submit: where the navigation landed. */
+  resultTarget: z.enum(['same', 'blank']).optional(),
 })
 export type RecordingEvent = z.infer<typeof recordingEventSchema>
 
@@ -66,6 +85,7 @@ export const recordingSchema = z.object({
   name: z.string().min(1),
   intent: z.string().min(1),
   kind: z.enum(['login', 'app']).default('app'),
+  prerequisiteWorkflowId: z.string().min(1).optional(),
   events: z.array(recordingEventSchema).min(1),
 })
 export type Recording = z.infer<typeof recordingSchema>
@@ -75,6 +95,19 @@ export function lastRecordedUrl(events: RecordingEvent[]): string | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (!event || event.type === 'cookies') continue
+    if (/^https?:/i.test(event.url)) return event.url
+  }
+  return undefined
+}
+
+export function firstRecordedUrl(events: RecordingEvent[]): string | undefined {
+  const ordered = [...events].sort((left, right) => {
+    const seqDelta = (left.seq ?? Number.MAX_SAFE_INTEGER) - (right.seq ?? Number.MAX_SAFE_INTEGER)
+    if (seqDelta !== 0) return seqDelta
+    return left.timestamp.localeCompare(right.timestamp)
+  })
+  for (const event of ordered) {
+    if (event.type === 'cookies') continue
     if (/^https?:/i.test(event.url)) return event.url
   }
   return undefined
@@ -109,8 +142,18 @@ export function sessionCredentialKeyForUrl(url: string): string {
 function eventToStep(event: RecordingEvent, index: number): WorkflowStep | undefined {
   const common = { id: `step-${index + 1}`, timeoutMs: 30_000, retries: 1, requiresConfirmation: false }
   if (event.type === 'extract') {
-    // Notification monitor metadata — not a browser replay step.
-    return undefined
+    if (!event.element?.selector || !event.extractLabel) return undefined
+    return {
+      ...common,
+      tool: 'browser.extract',
+      timeoutMs: 5_000,
+      params: {
+        target: event.element.selector,
+        // Bind extract to the page where it was recorded (click-caused opens are not replayed).
+        url: event.url,
+      },
+      saveAs: `extract:${event.extractLabel}`,
+    }
   }
   if (event.type === 'waitNavigation') {
     return {
@@ -125,6 +168,13 @@ function eventToStep(event: RecordingEvent, index: number): WorkflowStep | undef
     }
   }
   if (event.type === 'navigation' || event.type === 'tab') {
+    // Only user-initiated opens are replayed. Click-caused / redirect hops are passive.
+    if (event.navCause === 'click' || event.navCause === 'redirect') return undefined
+    if (event.type === 'tab' && event.tabAction && event.tabAction !== 'created' && event.tabAction !== 'activated') {
+      return undefined
+    }
+    // Tab activate alone shouldn't open a URL during replay.
+    if (event.type === 'tab' && event.tabAction === 'activated') return undefined
     return { ...common, tool: 'browser.open', params: { url: event.url } }
   }
   if (event.type === 'cookies') {
@@ -154,8 +204,27 @@ function eventToStep(event: RecordingEvent, index: number): WorkflowStep | undef
   return {
     ...common,
     tool: 'browser.click',
-    params: { target: event.element.selector },
+    params: { target: sanitizeClickSelector(event.element.selector) },
     requiresConfirmation: event.type === 'submit',
+  }
+}
+
+/** Drop tooltip/help-ish scope; compact oversized label text — no site-specific css. */
+export function sanitizeClickSelector(
+  selector: z.infer<typeof selectorSchema>,
+): z.infer<typeof selectorSchema> {
+  const noisy = /help|tooltip|popover|hint|description|desc(?:-|$)/i
+  const parents = (selector.parents ?? []).filter(
+    (parent) => !noisy.test(`${parent.css ?? ''} ${parent.tag ?? ''}`),
+  )
+  const css = selector.css && !noisy.test(selector.css) ? selector.css : undefined
+  const text = selector.text ? compactSelectorText(selector.text) : undefined
+  const { parents: _parents, css: _css, text: _text, ...rest } = selector
+  return {
+    ...rest,
+    ...(text ? { text } : {}),
+    ...(css ? { css } : {}),
+    ...(parents.length ? { parents } : {}),
   }
 }
 
@@ -236,6 +305,9 @@ export function recordingToWorkflow(input: RecordingInput): Workflow {
     intent,
     kind,
     ...(homeUrl ? { homeUrl } : {}),
+    ...(recording.prerequisiteWorkflowId
+      ? { prerequisiteWorkflowId: recording.prerequisiteWorkflowId }
+      : {}),
     description: kind === 'login'
       ? `Login workflow${homeUrl ? `; home=${homeUrl}` : ''}`
       : `Generated from recording ${recording.id}`,

@@ -1,4 +1,4 @@
-import type { CookieRecord, RecordingEvent } from '@workcopilot/browser-recorder'
+import type { CookieRecord, ElementSnapshot, RecordingEvent } from '@workcopilot/browser-recorder'
 
 export type RecorderEventPayload = Omit<RecordingEvent, 'id' | 'seq'> & {
   id?: string
@@ -19,10 +19,21 @@ export type RecorderMessage =
   | { type: 'recorder.resume' }
   | { type: 'recorder.waitNavigation' }
   | { type: 'recorder.armExtract'; armed: boolean }
-  | { type: 'recorder.confirmExtract'; label: string; text: string; url: string }
+  | {
+    type: 'recorder.confirmExtract'
+    label: string
+    text: string
+    url: string
+    element?: ElementSnapshot
+  }
   | { type: 'recorder.event'; event: RecorderEventPayload }
   | { type: 'recorder.status' }
-  | { type: 'recorder.extractPending'; text: string; url: string }
+  | {
+    type: 'recorder.extractPending'
+    text: string
+    url: string
+    element?: ElementSnapshot
+  }
   | { type: 'recorder.config'; active: boolean; paused: boolean; extractArmed: boolean }
 
-export type { CookieRecord, RecordingEvent }
+export type { CookieRecord, RecordingEvent, ElementSnapshot }

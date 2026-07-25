@@ -2,6 +2,14 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { ToolRegistry, type AgentEvent, type ToolContext } from '@workcopilot/tool-registry'
 
+export {
+  compactSelectorText,
+  decodeHtmlEntities,
+  flexibleTextRegex,
+  normalizeMatchText,
+} from './html-text.js'
+
+
 export const selectorScopeSchema = z.object({
   tag: z.string().optional(),
   ariaLabel: z.string().optional(),
@@ -49,11 +57,52 @@ export const workflowSchema = z.object({
   kind: workflowKindSchema.default('app'),
   /** For login workflows: last captured URL used as session home / fast-path entry. */
   homeUrl: z.string().url().optional(),
+  /** Run this workflow first when executing (e.g. login before app). */
+  prerequisiteWorkflowId: z.string().min(1).optional(),
   createdAt: z.string().datetime().optional(),
   updatedAt: z.string().datetime().optional(),
   steps: z.array(workflowStepSchema).min(1),
 })
 export type Workflow = z.infer<typeof workflowSchema>
+
+/** origin + pathname (trailing slash ignored) for workflow chain matching. */
+export function documentPathKey(url: string): string | undefined {
+  try {
+    const parsed = new URL(url)
+    const path = parsed.pathname.replace(/\/+$/, '') || '/'
+    return `${parsed.origin}${path}`
+  } catch {
+    return undefined
+  }
+}
+
+export function workflowEntryUrl(workflow: Pick<Workflow, 'steps' | 'homeUrl'>): string | undefined {
+  for (const step of workflow.steps) {
+    if (step.tool === 'browser.open' && typeof step.params.url === 'string') return step.params.url
+  }
+  return undefined
+}
+
+export function workflowExitUrl(workflow: Pick<Workflow, 'steps' | 'homeUrl'>): string | undefined {
+  if (workflow.homeUrl) return workflow.homeUrl
+  for (let index = workflow.steps.length - 1; index >= 0; index -= 1) {
+    const step = workflow.steps[index]
+    if (step?.tool === 'browser.open' && typeof step.params.url === 'string') return step.params.url
+  }
+  return undefined
+}
+
+/** Prerequisite last path must equal current first path. */
+export function canLinkPrerequisite(
+  prerequisite: Pick<Workflow, 'steps' | 'homeUrl'>,
+  current: Pick<Workflow, 'steps' | 'homeUrl'> | { entryUrl?: string },
+): boolean {
+  const exit = documentPathKey(workflowExitUrl(prerequisite) || '')
+  const entry = 'entryUrl' in current && current.entryUrl
+    ? documentPathKey(current.entryUrl)
+    : documentPathKey(workflowEntryUrl(current as Pick<Workflow, 'steps' | 'homeUrl'>) || '')
+  return Boolean(exit && entry && exit === entry)
+}
 
 
 export const executionStatusSchema = z.enum(['PENDING', 'RUNNING', 'WAITING_CONFIRMATION', 'SUCCESS', 'FAILED', 'CANCELLED'])

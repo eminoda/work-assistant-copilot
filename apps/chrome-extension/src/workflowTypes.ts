@@ -4,6 +4,7 @@ export type WorkflowSummary = {
   intent: string
   kind?: 'login' | 'app' | string
   homeUrl?: string
+  prerequisiteWorkflowId?: string
   description?: string
   createdAt?: string
   updatedAt?: string

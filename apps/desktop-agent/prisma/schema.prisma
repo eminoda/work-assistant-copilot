@@ -107,3 +107,33 @@ model Report {
   createdAt DateTime @default(now())
   @@index([type, startDate, endDate])
 }
+
+model NotifyMessage {
+  id            String   @id @default(cuid())
+  title         String
+  tag           String   @default("workflow")
+  label         String   @default("")
+  value         String   @default("")
+  previousValue String?
+  workflowId    String?
+  unread        Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([workflowId, label])
+  @@index([updatedAt])
+  @@index([unread])
+}
+
+model NotifySchedule {
+  id              String    @id @default(cuid())
+  workflowId      String
+  intervalMinutes Int       @default(60)
+  enabled         Boolean   @default(true)
+  lastRunAt       DateTime?
+  nextRunAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([nextRunAt])
+}

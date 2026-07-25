@@ -1,5 +1,5 @@
 <script setup lang="ts">
-defineProps<{ recording: boolean }>()
+defineProps<{ recording: boolean; unreadCount?: number }>()
 const emit = defineEmits<{
   record: []
   notify: []
@@ -31,6 +31,7 @@ const emit = defineEmits<{
             d="M12 22a2.2 2.2 0 0 0 2.2-2.2h-4.4A2.2 2.2 0 0 0 12 22zm7-5.5V11a7 7 0 1 0-14 0v5.5L3 18.5V20h18v-1.5l-2-2z"
           />
         </svg>
+        <i v-if="(unreadCount || 0) > 0" class="badge-count">{{ unreadCount! > 99 ? '99+' : unreadCount }}</i>
       </span>
       <span class="action-label">通知</span>
     </button>

@@ -23,7 +23,7 @@ const emit = defineEmits<{
   complete: []
 }>()
 
-const pendingExtract = shallowRef<{ text: string; url: string } | null>(null)
+const pendingExtract = shallowRef<{ text: string; url: string; element?: RecordingEvent['element'] } | null>(null)
 const extractLabel = shallowRef('')
 const eventListEl = shallowRef<HTMLElement | null>(null)
 
@@ -58,12 +58,26 @@ watch(
 function titleFor(event: RecordingEvent) {
   switch (event.type) {
     case 'navigation':
+      if (event.navCause === 'redirect') return '跳转（重定向）'
+      if (event.navCause === 'click') return '跳转（由点击触发）'
       return '打开页面'
     case 'tab':
+      if (event.tabAction === 'created' && event.navCause === 'click') return '新标签（由点击触发）'
+      if (event.tabAction === 'created' && event.navCause === 'redirect') return '新标签（重定向）'
       return event.tabAction === 'activated' ? '切换标签页' : event.tabAction === 'created' ? '新建标签页' : '关闭标签页'
     case 'input':
       return event.credentialKey ? '输入密码' : '输入内容'
     case 'click':
+      if (event.resultTarget === 'blank' && event.resultUrl) {
+        return event.element?.selector.text
+          ? `点击「${event.element.selector.text}」→ 新标签`
+          : '点击元素 → 新标签'
+      }
+      if (event.resultUrl) {
+        return event.element?.selector.text
+          ? `点击「${event.element.selector.text}」→ 跳转`
+          : '点击元素 → 跳转'
+      }
       return event.element?.selector.text
         ? `点击「${event.element.selector.text}」`
         : '点击元素'
@@ -72,7 +86,7 @@ function titleFor(event: RecordingEvent) {
     case 'waitNavigation':
       return '等待跳转'
     case 'extract':
-      return event.extractLabel ? `提取：${event.extractLabel}` : '文字提取'
+      return event.extractLabel ? `抓取：${event.extractLabel}` : '信息抓取'
     default:
       return event.type
   }
@@ -92,10 +106,22 @@ function detailFor(event: RecordingEvent) {
       : sel?.placeholder || sel?.css || event.url
   }
   if (event.type === 'click' || event.type === 'submit') {
+    if (event.resultUrl) {
+      const via = event.resultTarget === 'blank' ? '新标签' : '同页'
+      return `${via} · ${event.resultUrl}`
+    }
     const sel = event.element?.selector
     return sel?.stableAttribute
       ? `${sel.stableAttribute.name}=${sel.stableAttribute.value}`
       : sel?.role || sel?.text || event.url
+  }
+  if (event.type === 'navigation' || event.type === 'tab') {
+    const cause = event.navCause === 'redirect'
+      ? '被动重定向（执行时忽略）'
+      : event.navCause === 'click'
+        ? '点击结果（执行时只点，不单独打开）'
+        : ''
+    return cause ? `${cause} · ${event.url}` : event.url
   }
   return event.url
 }
@@ -104,11 +130,16 @@ function onMessage(message: {
   type?: string
   text?: string
   url?: string
+  element?: RecordingEvent['element']
   events?: RecordingEvent[]
 }) {
   if (message.type === 'recorder.extractPending' && message.text && message.url) {
-    pendingExtract.value = { text: message.text, url: message.url }
-    extractLabel.value = message.text.slice(0, 24)
+    pendingExtract.value = {
+      text: message.text,
+      url: message.url,
+      element: message.element,
+    }
+    extractLabel.value = ''
   }
 }
 
@@ -121,6 +152,7 @@ async function confirmExtract() {
     label,
     text: pending.text,
     url: pending.url,
+    element: pending.element,
   })
   pendingExtract.value = null
   extractLabel.value = ''
@@ -237,24 +269,33 @@ onUnmounted(() => {
           class="tool-btn"
           type="button"
           :data-on="extractArmed"
-          title="文字提取（用于通知）"
+          title="信息抓取（点击页面元素）"
           :disabled="!active"
           @click="emit('armExtract')"
         >
           <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-            <path fill="currentColor" d="M4 4h16v2H4V4zm2 4h12v2H6V8zm-2 4h16v2H4v-2zm2 4h10v2H6v-2z" />
+            <path
+              fill="currentColor"
+              d="M12 5c5.2 0 9.5 3.2 11 7.5C21.5 16.8 17.2 20 12 20S2.5 16.8 1 12.5C2.5 8.2 6.8 5 12 5zm0 2.5A5 5 0 1 0 12 17a5 5 0 0 0 0-9.5zm0 2a3 3 0 1 1 0 6 3 3 0 0 1 0-6z"
+            />
           </svg>
-          <span>{{ extractArmed ? '选择文字中' : '文字提取' }}</span>
+          <span>{{ extractArmed ? '抓取中' : '信息抓取' }}</span>
         </button>
       </aside>
     </div>
 
     <div v-if="pendingExtract" class="extract-dialog card">
-      <strong>命名提取文字</strong>
+      <strong>命名抓取内容</strong>
       <p class="hint">「{{ pendingExtract.text.slice(0, 80) }}」</p>
       <label class="field">
-        名称（用于通知监听）
-        <input v-model="extractLabel" type="text" placeholder="例如：Bug 标题" @keydown.enter.prevent="confirmExtract" />
+        名称
+        <input
+          v-model="extractLabel"
+          type="text"
+          placeholder="例如：我的bug"
+          autofocus
+          @keydown.enter.prevent="confirmExtract"
+        />
       </label>
       <div class="row">
         <button class="secondary" type="button" @click="dismissExtract">取消</button>

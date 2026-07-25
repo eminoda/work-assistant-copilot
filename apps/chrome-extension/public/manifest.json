@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WorkCopilot",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "description": "Local-first browser workflow recorder and runner",
   "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting", "webNavigation", "cookies"],
   "host_permissions": ["http://127.0.0.1:4317/*", "http://localhost:4317/*", "<all_urls>"],
@@ -12,6 +12,6 @@
     "matches": ["<all_urls>"],
     "js": ["content.js"],
     "run_at": "document_idle",
-    "all_frames": false
+    "all_frames": true
   }]
 }

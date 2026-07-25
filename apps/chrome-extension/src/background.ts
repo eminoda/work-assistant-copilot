@@ -15,6 +15,14 @@ const touchedOrigins = new Set<string>()
 let cookieFlushTimer: ReturnType<typeof setTimeout> | undefined
 /** When set, the next navigation fills expectedUrl on this wait event. */
 let pendingWaitEventId: string | undefined
+/** Recent click/submit waiting to bind a same-tab or _blank navigation. */
+let pendingClick: {
+  eventId: string
+  tabId?: number
+  at: number
+  bound: boolean
+} | undefined
+const CLICK_NAV_WINDOW_MS = 4_000
 /** First-visit cookies per host — compared at stop to find login session cookies. */
 const baselineCookiesByHost = new Map<string, Map<string, CookieRecord>>()
 const latestCookiesByHost = new Map<string, Map<string, CookieRecord>>()
@@ -108,12 +116,33 @@ function pushEvent(partial: Omit<RecordingEvent, 'id' | 'seq'> & { id?: string; 
   if (!active) return
   if (paused && partial.type !== 'waitNavigation' && partial.type !== 'extract') return
 
+  if (partial.type === 'click' || partial.type === 'submit') {
+    const event: RecordingEvent = {
+      ...partial,
+      id: partial.id || crypto.randomUUID(),
+      seq: ++seq,
+      timestamp: partial.timestamp || new Date().toISOString(),
+    }
+    events.push(event)
+    pendingClick = {
+      eventId: event.id,
+      ...(partial.tabId !== undefined ? { tabId: partial.tabId } : {}),
+      at: Date.now(),
+      bound: false,
+    }
+    persistState()
+    broadcastStatus()
+    return
+  }
+
   if (partial.type === 'navigation' || (partial.type === 'tab' && partial.tabAction !== 'removed')) {
     const key = navigationKey(partial.url)
-    if (key === lastNavigationKey) return
-    lastNavigationKey = key
-    lastHttpUrl = partial.url
-    rememberOrigin(partial.url)
+    if (key === lastNavigationKey && partial.type === 'navigation') return
+    if (partial.type === 'navigation' || partial.type === 'tab') {
+      lastNavigationKey = key
+      lastHttpUrl = partial.url
+      rememberOrigin(partial.url)
+    }
 
     if (pendingWaitEventId) {
       const wait = events.find((event) => event.id === pendingWaitEventId && event.type === 'waitNavigation')
@@ -124,6 +153,41 @@ function pushEvent(partial: Omit<RecordingEvent, 'id' | 'seq'> & { id?: string; 
         broadcastStatus()
       }
     }
+
+    const clickPending = pendingClick
+      && Date.now() - pendingClick.at <= CLICK_NAV_WINDOW_MS
+      ? pendingClick
+      : undefined
+    if (!clickPending) pendingClick = undefined
+
+    let navCause = partial.navCause
+    if (!navCause && clickPending) {
+      const clickEvent = events.find((event) => event.id === clickPending.eventId)
+      if (clickEvent && (clickEvent.type === 'click' || clickEvent.type === 'submit')) {
+        const isBlank = partial.type === 'tab' && partial.tabAction === 'created'
+        if (!clickPending.bound) {
+          clickEvent.resultUrl = partial.url
+          clickEvent.resultTarget = isBlank ? 'blank' : 'same'
+          clickPending.bound = true
+          navCause = 'click'
+        } else {
+          navCause = 'redirect'
+        }
+      }
+    }
+    if (!navCause) navCause = 'user'
+
+    const event: RecordingEvent = {
+      ...partial,
+      id: partial.id || crypto.randomUUID(),
+      seq: ++seq,
+      timestamp: partial.timestamp || new Date().toISOString(),
+      navCause,
+    }
+    events.push(event)
+    persistState()
+    broadcastStatus()
+    return
   }
 
   if (partial.type === 'cookies') {
@@ -242,28 +306,44 @@ async function captureCurrentNavigation() {
 
 async function ensureContentScript(tabId: number) {
   try {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] })
-    await chrome.tabs.sendMessage(tabId, {
-      type: 'recorder.config',
-      active,
-      paused,
-      extractArmed,
-    }).catch(() => undefined)
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ['content.js'],
+    })
+    await syncContentConfigForTab(tabId)
   } catch {
     // Restricted pages cannot be scripted.
   }
+}
+
+async function syncContentConfigForTab(tabId: number) {
+  const payload = {
+    type: 'recorder.config' as const,
+    active,
+    paused,
+    extractArmed,
+  }
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId })
+    if (frames?.length) {
+      await Promise.all(
+        frames.map((frame) =>
+          chrome.tabs.sendMessage(tabId, payload, { frameId: frame.frameId }).catch(() => undefined),
+        ),
+      )
+      return
+    }
+  } catch {
+    // webNavigation may be unavailable on some builds; fall through.
+  }
+  await chrome.tabs.sendMessage(tabId, payload).catch(() => undefined)
 }
 
 async function syncContentConfig() {
   const tabs = await chrome.tabs.query({})
   for (const tab of tabs) {
     if (tab.id === undefined || !isHttpUrl(tab.url)) continue
-    await chrome.tabs.sendMessage(tab.id, {
-      type: 'recorder.config',
-      active,
-      paused,
-      extractArmed,
-    }).catch(() => undefined)
+    await syncContentConfigForTab(tab.id)
   }
 }
 
@@ -356,6 +436,16 @@ chrome.tabs.onActivated.addListener((info) => {
 
 chrome.tabs.onCreated.addListener((tab) => {
   if (tab.id === undefined) return
+  // Prefer binding _blank opens to the recent click on the opener tab.
+  if (
+    pendingClick
+    && !pendingClick.bound
+    && Date.now() - pendingClick.at <= CLICK_NAV_WINDOW_MS
+    && tab.openerTabId !== undefined
+    && (pendingClick.tabId === undefined || pendingClick.tabId === tab.openerTabId)
+  ) {
+    pendingClick.tabId = tab.openerTabId
+  }
   void recordTabChange(tab.id, 'created', tab.pendingUrl || tab.url)
 })
 
@@ -378,6 +468,7 @@ chrome.runtime.onMessage.addListener((message: RecorderMessage, sender, sendResp
       paused = false
       extractArmed = false
       pendingWaitEventId = undefined
+      pendingClick = undefined
       events = []
       seq = 0
       lastNavigationKey = ''
@@ -413,6 +504,7 @@ chrome.runtime.onMessage.addListener((message: RecorderMessage, sender, sendResp
       paused = false
       extractArmed = false
       pendingWaitEventId = undefined
+      pendingClick = undefined
       persistState()
       await syncContentConfig()
       const ordered = sortEvents(events)
@@ -468,7 +560,13 @@ chrome.runtime.onMessage.addListener((message: RecorderMessage, sender, sendResp
   if (message.type === 'recorder.armExtract') {
     extractArmed = message.armed
     persistState()
-    void syncContentConfig()
+    void (async () => {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
+      if (tab?.id !== undefined && isHttpUrl(tab.url)) {
+        await ensureContentScript(tab.id)
+      }
+      await syncContentConfig()
+    })()
     sendResponse({ active, paused, extractArmed, events: sortEvents(events) })
     broadcastStatus()
     return false
@@ -482,6 +580,7 @@ chrome.runtime.onMessage.addListener((message: RecorderMessage, sender, sendResp
       extractLabel: message.label,
       extractText: message.text,
       value: message.text,
+      ...(message.element ? { element: message.element } : {}),
     })
     extractArmed = false
     persistState()
@@ -497,6 +596,7 @@ chrome.runtime.onMessage.addListener((message: RecorderMessage, sender, sendResp
         type: 'recorder.extractPending',
         text: message.event.extractText || message.event.value || '',
         url: message.event.url,
+        element: message.event.element,
       }).catch(() => undefined)
       extractArmed = false
       persistState()

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, shallowRef, watch } from 'vue'
+import { canLinkPrerequisite, workflowExitUrl } from '../workflowLink'
+import type { WorkflowSummary } from '../workflowTypes'
 
 export type WorkflowKindOption = 'login' | 'app'
 
@@ -8,6 +10,8 @@ const props = defineProps<{
   credentialKeys?: string[]
   error?: string
   saving?: boolean
+  workflows?: WorkflowSummary[]
+  entryUrl?: string
 }>()
 
 const emit = defineEmits<{
@@ -15,15 +19,37 @@ const emit = defineEmits<{
     name: string
     kind: WorkflowKindOption
     credentials: Record<string, string>
+    prerequisiteWorkflowId?: string
   }]
   cancel: []
 }>()
 
 const name = shallowRef(props.defaultName)
 const kind = shallowRef<WorkflowKindOption>('login')
+const prerequisiteWorkflowId = shallowRef('')
 const passwords = reactive<Record<string, string>>({})
 
 const keys = computed(() => props.credentialKeys ?? [])
+
+const prerequisiteOptions = computed(() => {
+  const list = props.workflows ?? []
+  const entryUrl = props.entryUrl
+  if (!entryUrl) return []
+  return list.filter((workflow) => canLinkPrerequisite(
+    {
+      homeUrl: workflow.homeUrl,
+      steps: (workflow.steps || []).map((step) => ({
+        id: step.id || 'x',
+        tool: step.tool,
+        params: { ...step.params },
+        timeoutMs: 30_000,
+        retries: 0,
+        requiresConfirmation: false,
+      })),
+    },
+    { entryUrl },
+  ))
+})
 
 watch(
   () => props.defaultName,
@@ -42,6 +68,16 @@ watch(
   { immediate: true },
 )
 
+watch(
+  prerequisiteOptions,
+  (options) => {
+    if (!options.some((item) => item.id === prerequisiteWorkflowId.value)) {
+      prerequisiteWorkflowId.value = ''
+    }
+  },
+  { immediate: true },
+)
+
 const canSubmit = computed(() => {
   if (!name.value.trim()) return false
   return keys.value.every((key) => Boolean(passwords[key]?.trim()))
@@ -54,6 +90,21 @@ function shortKey(key: string) {
     : key
 }
 
+function optionHint(workflow: WorkflowSummary) {
+  const exit = workflowExitUrl({
+    homeUrl: workflow.homeUrl,
+    steps: (workflow.steps || []).map((step) => ({
+      id: step.id || 'x',
+      tool: step.tool,
+      params: { ...step.params },
+      timeoutMs: 30_000,
+      retries: 0,
+      requiresConfirmation: false,
+    })),
+  })
+  return exit || workflow.homeUrl || ''
+}
+
 function submit() {
   if (!canSubmit.value) return
   emit('save', {
@@ -62,6 +113,9 @@ function submit() {
     credentials: Object.fromEntries(
       keys.value.map((key) => [key, passwords[key]!.trim()]),
     ),
+    ...(prerequisiteWorkflowId.value
+      ? { prerequisiteWorkflowId: prerequisiteWorkflowId.value }
+      : {}),
   })
 }
 </script>
@@ -91,6 +145,23 @@ function submit() {
           <option value="app">应用</option>
         </select>
       </label>
+
+      <label class="field">
+        前置工作流
+        <select v-model="prerequisiteWorkflowId" class="select" :disabled="saving">
+          <option value="">无（不关联）</option>
+          <option
+            v-for="workflow in prerequisiteOptions"
+            :key="workflow.id"
+            :value="workflow.id"
+          >
+            {{ workflow.name }}{{ optionHint(workflow) ? ` · ${optionHint(workflow)}` : '' }}
+          </option>
+        </select>
+      </label>
+      <p class="hint">
+        仅列出末路径与当前录制首路径相同的工作流。执行时会先跑前置任务。
+      </p>
 
       <div v-if="keys.length" class="password-block">
         <strong class="password-title">填写密码</strong>

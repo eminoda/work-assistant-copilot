@@ -11,6 +11,7 @@ import { z } from 'zod'
 const packedStepsSchema = z.object({
   kind: z.enum(['login', 'app']).optional(),
   homeUrl: z.string().url().optional(),
+  prerequisiteWorkflowId: z.string().min(1).optional(),
   steps: z.array(workflowStepSchema),
 })
 
@@ -18,6 +19,7 @@ function packWorkflowSteps(workflow: Workflow): Prisma.InputJsonValue {
   return {
     kind: workflow.kind,
     ...(workflow.homeUrl ? { homeUrl: workflow.homeUrl } : {}),
+    ...(workflow.prerequisiteWorkflowId ? { prerequisiteWorkflowId: workflow.prerequisiteWorkflowId } : {}),
     steps: workflow.steps,
   } as Prisma.InputJsonValue
 }
@@ -51,6 +53,9 @@ function unpackWorkflowRow(row: {
       version: 1,
       kind: packed.data.kind ?? (row.intent.includes('login') ? 'login' : 'app'),
       ...(packed.data.homeUrl ? { homeUrl: packed.data.homeUrl } : {}),
+      ...(packed.data.prerequisiteWorkflowId
+        ? { prerequisiteWorkflowId: packed.data.prerequisiteWorkflowId }
+        : {}),
       ...(createdAt ? { createdAt } : {}),
       ...(updatedAt ? { updatedAt } : {}),
       steps: packed.data.steps,
@@ -128,6 +133,38 @@ export class WorkCopilotStore {
     return unpackWorkflowRow(row)
   }
   async deleteWorkflow(id: string) { await this.db.workflow.delete({ where: { id } }) }
+
+  async renameWorkflow(id: string, name: string) {
+    const trimmed = name.trim()
+    if (!trimmed) throw new Error('名称不能为空')
+    const existing = await this.getWorkflow(id)
+    if (!existing) throw new Error('Workflow not found')
+    await this.assertWorkflowNameAvailable(trimmed, id)
+    await this.db.workflow.update({ where: { id }, data: { name: trimmed } })
+    return this.getWorkflow(id)
+  }
+
+  async setPrerequisiteWorkflowId(id: string, prerequisiteWorkflowId: string | null) {
+    const workflow = await this.getWorkflow(id)
+    if (!workflow) throw new Error('Workflow not found')
+    if (prerequisiteWorkflowId) {
+      if (prerequisiteWorkflowId === id) throw new Error('不能将自身设为前置工作流')
+      const prerequisite = await this.getWorkflow(prerequisiteWorkflowId)
+      if (!prerequisite) throw new Error('前置工作流不存在')
+    }
+    const next: Workflow = {
+      ...workflow,
+      ...(prerequisiteWorkflowId
+        ? { prerequisiteWorkflowId }
+        : { prerequisiteWorkflowId: undefined }),
+    }
+    if (!prerequisiteWorkflowId) delete (next as { prerequisiteWorkflowId?: string }).prerequisiteWorkflowId
+    await this.db.workflow.update({
+      where: { id },
+      data: { steps: packWorkflowSteps(next) },
+    })
+    return this.getWorkflow(id)
+  }
 
   async saveRecording(input: { name: string; intent: string; events: unknown[]; url?: string }) {
     return this.db.recording.create({ data: { ...input, events: input.events as Prisma.InputJsonValue } })
@@ -209,5 +246,163 @@ export class WorkCopilotStore {
   }
   async setSetting(key: string, value: string) {
     return this.db.userSetting.upsert({ where: { key }, create: { key, value }, update: { value } })
+  }
+
+  async listNotifyMessages() {
+    const rows = await this.db.$queryRawUnsafe<Array<{
+      id: string
+      title: string
+      tag: string
+      label: string
+      value: string
+      previousValue: string | null
+      workflowId: string | null
+      unread: number | boolean
+      createdAt: string
+      updatedAt: string
+    }>>(`SELECT * FROM "NotifyMessage" ORDER BY datetime("updatedAt") DESC`)
+    return rows.map((row) => ({
+      ...row,
+      unread: Boolean(row.unread),
+      previousValue: row.previousValue ?? null,
+    }))
+  }
+
+  async countUnreadMessages() {
+    const rows = await this.db.$queryRawUnsafe<Array<{ count: number | bigint }>>(
+      `SELECT COUNT(*) as count FROM "NotifyMessage" WHERE "unread" = 1`,
+    )
+    return Number(rows[0]?.count ?? 0)
+  }
+
+  async markMessageRead(id: string) {
+    await this.db.$executeRawUnsafe(
+      `UPDATE "NotifyMessage" SET "unread" = 0, "updatedAt" = CURRENT_TIMESTAMP WHERE "id" = ?`,
+      id,
+    )
+  }
+
+  async markAllMessagesRead() {
+    await this.db.$executeRawUnsafe(
+      `UPDATE "NotifyMessage" SET "unread" = 0, "updatedAt" = CURRENT_TIMESTAMP WHERE "unread" = 1`,
+    )
+  }
+
+  async upsertExtractMessage(input: {
+    workflowId: string
+    title: string
+    label: string
+    value: string
+  }) {
+    const existing = await this.db.$queryRawUnsafe<Array<{
+      id: string
+      value: string
+    }>>(
+      `SELECT "id", "value" FROM "NotifyMessage" WHERE "workflowId" = ? AND "label" = ? LIMIT 1`,
+      input.workflowId,
+      input.label,
+    )
+    const current = existing[0]
+    if (!current) {
+      const { randomUUID } = await import('node:crypto')
+      const id = randomUUID()
+      await this.db.$executeRawUnsafe(
+        `INSERT INTO "NotifyMessage"
+          ("id", "title", "tag", "label", "value", "previousValue", "workflowId", "unread", "createdAt", "updatedAt")
+         VALUES (?, ?, 'workflow', ?, ?, NULL, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        id,
+        input.title,
+        input.label,
+        input.value,
+        input.workflowId,
+      )
+      return { id, created: true, changed: true }
+    }
+    const changed = current.value !== input.value
+    if (!changed) {
+      await this.db.$executeRawUnsafe(
+        `UPDATE "NotifyMessage"
+         SET "title" = ?, "updatedAt" = CURRENT_TIMESTAMP
+         WHERE "id" = ?`,
+        input.title,
+        current.id,
+      )
+      return { id: current.id, created: false, changed: false }
+    }
+    await this.db.$executeRawUnsafe(
+      `UPDATE "NotifyMessage"
+       SET "title" = ?, "value" = ?, "previousValue" = ?, "unread" = 1, "updatedAt" = CURRENT_TIMESTAMP
+       WHERE "id" = ?`,
+      input.title,
+      input.value,
+      current.value,
+      current.id,
+    )
+    return { id: current.id, created: false, changed: true }
+  }
+
+  async listNotifySchedules() {
+    return this.db.$queryRawUnsafe<Array<{
+      id: string
+      workflowId: string
+      intervalMinutes: number
+      enabled: number | boolean
+      lastRunAt: string | null
+      nextRunAt: string | null
+      createdAt: string
+      updatedAt: string
+    }>>(`SELECT * FROM "NotifySchedule" ORDER BY datetime("createdAt") DESC`)
+  }
+
+  async createNotifySchedule(input: { workflowId: string; intervalMinutes: number }) {
+    const { randomUUID } = await import('node:crypto')
+    const id = randomUUID()
+    const minutes = Math.max(1, Math.floor(input.intervalMinutes))
+    const next = new Date(Date.now() + minutes * 60_000).toISOString()
+    await this.db.$executeRawUnsafe(
+      `INSERT INTO "NotifySchedule"
+        ("id", "workflowId", "intervalMinutes", "enabled", "lastRunAt", "nextRunAt", "createdAt", "updatedAt")
+       VALUES (?, ?, ?, 1, NULL, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      id,
+      input.workflowId,
+      minutes,
+      next,
+    )
+    return { id, workflowId: input.workflowId, intervalMinutes: minutes, enabled: true, nextRunAt: next }
+  }
+
+  async deleteNotifySchedule(id: string) {
+    await this.db.$executeRawUnsafe(`DELETE FROM "NotifySchedule" WHERE "id" = ?`, id)
+  }
+
+  async setNotifyScheduleEnabled(id: string, enabled: boolean) {
+    await this.db.$executeRawUnsafe(
+      `UPDATE "NotifySchedule" SET "enabled" = ?, "updatedAt" = CURRENT_TIMESTAMP WHERE "id" = ?`,
+      enabled ? 1 : 0,
+      id,
+    )
+  }
+
+  async dueNotifySchedules(now = new Date()) {
+    return this.db.$queryRawUnsafe<Array<{
+      id: string
+      workflowId: string
+      intervalMinutes: number
+    }>>(
+      `SELECT "id", "workflowId", "intervalMinutes" FROM "NotifySchedule"
+       WHERE "enabled" = 1 AND ("nextRunAt" IS NULL OR datetime("nextRunAt") <= datetime(?))`,
+      now.toISOString(),
+    )
+  }
+
+  async markNotifyScheduleRun(id: string, intervalMinutes: number) {
+    const next = new Date(Date.now() + Math.max(1, intervalMinutes) * 60_000).toISOString()
+    await this.db.$executeRawUnsafe(
+      `UPDATE "NotifySchedule"
+       SET "lastRunAt" = CURRENT_TIMESTAMP, "nextRunAt" = ?, "updatedAt" = CURRENT_TIMESTAMP
+       WHERE "id" = ?`,
+      next,
+      id,
+    )
   }
 }

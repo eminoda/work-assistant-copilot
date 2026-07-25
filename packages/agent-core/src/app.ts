@@ -6,7 +6,7 @@ import { cors } from 'hono/cors'
 import { streamSSE } from 'hono/streaming'
 import { z } from 'zod'
 import { ToolRegistry, type AgentEvent } from '@workcopilot/tool-registry'
-import { WorkflowEngine, workflowSchema, type ExecutionResult, type Workflow } from '@workcopilot/workflow-engine'
+import { WorkflowEngine, workflowSchema, canLinkPrerequisite, type ExecutionResult, type Workflow } from '@workcopilot/workflow-engine'
 import { recordingSchema, recordingToWorkflow, sortRecordingEvents, lastRecordedUrl, sessionCredentialKeyForUrl } from '@workcopilot/browser-recorder'
 import { registerBrowserTools, PlaywrightRuntime, shouldSkipNavigation } from '@workcopilot/playwright-runtime'
 import { LocalCredentialProvider, getOrCreateLocalToken } from '@workcopilot/credential-provider'
@@ -171,6 +171,71 @@ function cancelledResult(executionId: string, startedAt: string, events: AgentEv
   }
 }
 
+function extractOutputText(output: unknown): string {
+  if (typeof output === 'string') return output.trim()
+  if (output && typeof output === 'object' && 'value' in output) {
+    const value = (output as { value: unknown }).value
+    if (value == null) return ''
+    return String(value).trim()
+  }
+  return ''
+}
+
+async function hasLoginPrerequisite(
+  services: AppServices,
+  workflow: Workflow & { id: string },
+): Promise<boolean> {
+  let cursorId = workflow.prerequisiteWorkflowId
+  const seen = new Set<string>()
+  while (cursorId) {
+    if (seen.has(cursorId)) break
+    seen.add(cursorId)
+    const prerequisite = await services.store.getWorkflow(cursorId)
+    if (!prerequisite) break
+    if (prerequisite.kind === 'login') return true
+    cursorId = prerequisite.prerequisiteWorkflowId
+  }
+  return false
+}
+
+function withoutCookieSteps(workflow: Workflow & { id: string }): Workflow & { id: string } {
+  const steps = workflow.steps.filter((step) => step.tool !== 'browser.setCookies')
+  if (steps.length === workflow.steps.length) return workflow
+  return {
+    ...workflow,
+    steps: steps.map((step, index) => ({ ...step, id: `step-${index + 1}` })),
+  }
+}
+
+async function persistExtractMessages(input: {
+  services: AppServices
+  workflow: Workflow & { id: string }
+  result: ExecutionResult
+}) {
+  const { services, workflow, result } = input
+  if (result.status !== 'SUCCESS') return
+  for (const step of workflow.steps) {
+    if (step.tool !== 'browser.extract' || !step.saveAs?.startsWith('extract:')) continue
+    const label = step.saveAs.slice('extract:'.length).trim()
+    if (!label) continue
+    const value = extractOutputText(result.outputs[step.saveAs])
+    if (!value) continue
+    try {
+      const saved = await services.store.upsertExtractMessage({
+        workflowId: workflow.id,
+        title: workflow.name,
+        label,
+        value,
+      })
+      console.log(
+        `[notify] ${result.id} message ${saved.created ? 'created' : 'updated'} label=${label} changed=${saved.changed}`,
+      )
+    } catch (error) {
+      console.warn(`[notify] ${result.id} persist extract failed`, error)
+    }
+  }
+}
+
 /** Login workflows: inject session cookies on homeUrl; if no redirect, skip full steps. */
 async function tryLoginSessionReuse(input: {
   workflow: Workflow & { id: string }
@@ -301,14 +366,82 @@ export function createApp(services: AppServices) {
     return c.json(await services.store.saveWorkflow(workflow), 201)
   })
   app.delete('/api/workflows/:id', async (c) => { await services.store.deleteWorkflow(c.req.param('id')); return c.body(null, 204) })
+  app.put('/api/workflows/:id/name', async (c) => {
+    const body = z.object({ name: z.string().min(1) }).parse(await c.req.json())
+    try {
+      const updated = await services.store.renameWorkflow(c.req.param('id'), body.name)
+      if (!updated) return c.json({ error: 'Workflow not found' }, 404)
+      return c.json({ workflow: updated })
+    } catch (error) {
+      if (error instanceof NameConflictError) return c.json({ error: error.message }, 409)
+      return c.json({ error: error instanceof Error ? error.message : '重命名失败' }, 400)
+    }
+  })
+  app.put('/api/workflows/:id/prerequisite', async (c) => {
+    const body = z.object({
+      prerequisiteWorkflowId: z.string().min(1).nullable(),
+    }).parse(await c.req.json())
+    const workflow = await services.store.getWorkflow(c.req.param('id'))
+    if (!workflow) return c.json({ error: 'Workflow not found' }, 404)
+    if (body.prerequisiteWorkflowId) {
+      const prerequisite = await services.store.getWorkflow(body.prerequisiteWorkflowId)
+      if (!prerequisite) return c.json({ error: '前置工作流不存在' }, 404)
+      if (!canLinkPrerequisite(prerequisite, workflow)) {
+        return c.json({ error: '路径不匹配：前置工作流末路径需与当前工作流首路径相同' }, 400)
+      }
+    }
+    try {
+      let updated = await services.store.setPrerequisiteWorkflowId(
+        c.req.param('id'),
+        body.prerequisiteWorkflowId,
+      )
+      if (!updated) return c.json({ error: 'Workflow not found' }, 404)
+      // Linking a login prerequisite: drop cookie injection from the current workflow.
+      if (body.prerequisiteWorkflowId) {
+        const prerequisite = await services.store.getWorkflow(body.prerequisiteWorkflowId)
+        if (prerequisite?.kind === 'login' && updated.steps.some((step) => step.tool === 'browser.setCookies')) {
+          const cleaned = withoutCookieSteps(updated)
+          await services.store.db.workflow.update({
+            where: { id: updated.id },
+            data: {
+              steps: {
+                kind: cleaned.kind,
+                ...(cleaned.homeUrl ? { homeUrl: cleaned.homeUrl } : {}),
+                ...(cleaned.prerequisiteWorkflowId
+                  ? { prerequisiteWorkflowId: cleaned.prerequisiteWorkflowId }
+                  : {}),
+                steps: cleaned.steps,
+              } as never,
+            },
+          })
+          updated = cleaned
+          console.log(`[workflow] ${updated.id} stripped cookie steps after linking login prerequisite`)
+        }
+      }
+      return c.json({ workflow: updated })
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : '更新失败' }, 400)
+    }
+  })
   app.post('/api/recordings', async (c) => {
     const recording = recordingSchema.parse(await c.req.json())
     await services.store.assertWorkflowNameAvailable(recording.name)
     let events = sortRecordingEvents(recording.events)
 
+    let skipCookieInjection = false
+    if (recording.prerequisiteWorkflowId) {
+      const prerequisite = await services.store.getWorkflow(recording.prerequisiteWorkflowId)
+      skipCookieInjection = prerequisite?.kind === 'login'
+    }
+
     // Persist cookie snapshots as credentials (same model as passwords) for later injection.
+    // App workflows with a login prerequisite skip cookie ownership — login flow owns the session.
     events = await Promise.all(events.map(async (event) => {
       if (event.type !== 'cookies' || !event.cookies?.length) return event
+      if (skipCookieInjection) {
+        const { cookies: _omit, cookieCredentialKey: _key, ...rest } = event
+        return rest
+      }
       const key = event.cookieCredentialKey || sessionCredentialKeyForUrl(event.url)
       await services.credentials.save(key, JSON.stringify(event.cookies))
       const { cookies: _omit, ...rest } = event
@@ -322,10 +455,27 @@ export function createApp(services: AppServices) {
       events,
       ...(homeUrl ? { url: homeUrl } : {}),
     })
-    const workflow = await services.store.saveWorkflow(recordingToWorkflow({ ...recording, events }))
+    let workflow = await services.store.saveWorkflow(recordingToWorkflow({ ...recording, events }))
+
+    if (skipCookieInjection && workflow.steps.some((step) => step.tool === 'browser.setCookies')) {
+      const cleaned = withoutCookieSteps(workflow)
+      await services.store.db.workflow.update({
+        where: { id: workflow.id },
+        data: { steps: {
+          kind: cleaned.kind,
+          ...(cleaned.homeUrl ? { homeUrl: cleaned.homeUrl } : {}),
+          ...(cleaned.prerequisiteWorkflowId
+            ? { prerequisiteWorkflowId: cleaned.prerequisiteWorkflowId }
+            : {}),
+          steps: cleaned.steps,
+        } as never },
+      })
+      workflow = cleaned
+      console.log(`[recordings] ${workflow.id} skip cookie steps — login prerequisite owns session`)
+    }
 
     // Bind session cookie credential to this workflow id for clearer ownership.
-    if (workflow.id && homeUrl) {
+    if (!skipCookieInjection && workflow.id && homeUrl) {
       const hostKey = sessionCredentialKeyForUrl(homeUrl)
       const raw = await services.credentials.get(hostKey)
       if (raw) {
@@ -347,6 +497,9 @@ export function createApp(services: AppServices) {
             steps: {
               kind: rebound.kind,
               ...(rebound.homeUrl ? { homeUrl: rebound.homeUrl } : {}),
+              ...(rebound.prerequisiteWorkflowId
+                ? { prerequisiteWorkflowId: rebound.prerequisiteWorkflowId }
+                : {}),
               steps: rebound.steps,
             } as never,
           },
@@ -395,11 +548,16 @@ export function createApp(services: AppServices) {
         resolveBrowserClosed()
       })
 
-      const holdUntilBrowserCloses = async (result: ExecutionResult): Promise<ExecutionResult> => {
+      const holdUntilBrowserCloses = async (
+        result: ExecutionResult,
+        target: Workflow & { id: string } = workflow,
+      ): Promise<ExecutionResult> => {
+        if (result.status === 'SUCCESS') {
+          await persistExtractMessages({ services, workflow: target, result })
+        }
         if (result.status === 'CANCELLED' || !services.browser.isSessionOpen()) return result
         phases.set(requestId, 'browser')
         console.log(`[execute] ${requestId} workflow ${result.status} — holding until browser closes`)
-        // Event + poll: closing the headed window may not always emit browser.disconnected.
         await Promise.race([
           browserClosed,
           (async () => {
@@ -412,10 +570,16 @@ export function createApp(services: AppServices) {
         return result
       }
 
-      try {
-        if (workflow.kind === 'login' && workflow.homeUrl) {
+      const runOneWorkflow = async (target: Workflow & { id: string }): Promise<ExecutionResult> => {
+        const skipCookies = await hasLoginPrerequisite(services, target)
+        const executable = skipCookies ? withoutCookieSteps(target) : target
+        if (skipCookies && executable.steps.length !== target.steps.length) {
+          console.log(`[execute] ${requestId} skip cookie injection for ${target.name} — login prerequisite owns session`)
+        }
+
+        if (executable.kind === 'login' && executable.homeUrl) {
           const reused = await tryLoginSessionReuse({
-            workflow,
+            workflow: executable,
             services,
             executionId: requestId,
             onEvent,
@@ -426,29 +590,27 @@ export function createApp(services: AppServices) {
           }
           if (reused) {
             if (reused.status === 'CANCELLED') return reused
-            console.log(`[execute] ${requestId} login session reuse success — skip full workflow`)
+            console.log(`[execute] ${requestId} login session reuse success — skip full workflow (${target.name})`)
             await persistLoginSessionFromBrowser({
               services,
-              workflowId: workflow.id,
-              homeUrl: workflow.homeUrl,
+              workflowId: target.id,
+              homeUrl: executable.homeUrl,
               executionId: requestId,
             })
-            return holdUntilBrowserCloses(reused)
+            return reused
           }
-          console.log(`[execute] ${requestId} login session reuse missed — run full workflow`)
+          console.log(`[execute] ${requestId} login session reuse missed — run full workflow (${target.name})`)
         }
 
-        const result = await services.engine.execute(workflow, onEvent, controller.signal, requestId)
-        if (result.status !== 'SUCCESS' || workflow.kind !== 'login' || !workflow.homeUrl) {
-          return holdUntilBrowserCloses(result)
-        }
+        const result = await services.engine.execute(executable, onEvent, controller.signal, requestId)
+        if (result.status !== 'SUCCESS' || executable.kind !== 'login' || !executable.homeUrl) return result
         try {
           const page = await services.browser.page()
           const current = page.url()
           if (/\/login(\/|$|\?|#)/i.test(current)) {
-            const error = `登录流程结束仍在登录页：${current}（期望进入 ${workflow.homeUrl}）`
+            const error = `登录流程结束仍在登录页：${current}（期望进入 ${executable.homeUrl}）`
             console.error(`[execute] ${requestId} ${error}`)
-            return holdUntilBrowserCloses({
+            return {
               ...result,
               status: 'FAILED' as const,
               error,
@@ -461,12 +623,12 @@ export function createApp(services: AppServices) {
                   timestamp: new Date().toISOString(),
                 },
               ],
-            })
+            }
           }
           await persistLoginSessionFromBrowser({
             services,
-            workflowId: workflow.id,
-            homeUrl: workflow.homeUrl,
+            workflowId: target.id,
+            homeUrl: executable.homeUrl,
             executionId: requestId,
           })
         } catch (error) {
@@ -475,7 +637,44 @@ export function createApp(services: AppServices) {
           }
           console.warn(`[execute] ${requestId} post-login URL check failed`, error)
         }
-        return holdUntilBrowserCloses(result)
+        return result
+      }
+
+      try {
+        const chain: Array<Workflow & { id: string }> = []
+        const seen = new Set<string>([workflow.id])
+        let cursorId = workflow.prerequisiteWorkflowId
+        while (cursorId) {
+          if (seen.has(cursorId)) {
+            return {
+              id: requestId,
+              status: 'FAILED',
+              startedAt: new Date().toISOString(),
+              finishedAt: new Date().toISOString(),
+              outputs: {},
+              error: '前置工作流存在循环引用',
+              events: [],
+            }
+          }
+          seen.add(cursorId)
+          const prerequisite = await services.store.getWorkflow(cursorId)
+          if (!prerequisite) break
+          chain.unshift(prerequisite)
+          cursorId = prerequisite.prerequisiteWorkflowId
+        }
+
+        for (const prerequisite of chain) {
+          console.log(`[execute] ${requestId} prerequisite → ${prerequisite.name} (${prerequisite.id})`)
+          const preResult = await runOneWorkflow(prerequisite)
+          if (preResult.status === 'SUCCESS') {
+            await persistExtractMessages({ services, workflow: prerequisite, result: preResult })
+          } else {
+            return holdUntilBrowserCloses(preResult, prerequisite)
+          }
+        }
+
+        const result = await runOneWorkflow(workflow)
+        return holdUntilBrowserCloses(result, workflow)
       } finally {
         services.browser.setDisconnectHandler(undefined)
         services.browser.setRelaunchOnClose(true)
@@ -527,6 +726,71 @@ export function createApp(services: AppServices) {
     const execution = await services.store.getExecution(id)
     return execution ? c.json(execution) : c.json({ error: 'Execution not found' }, 404)
   })
+
+  app.get('/api/messages', async (c) => c.json(await services.store.listNotifyMessages()))
+  app.get('/api/messages/unread-count', async (c) => c.json({ count: await services.store.countUnreadMessages() }))
+  app.post('/api/messages/:id/read', async (c) => {
+    await services.store.markMessageRead(c.req.param('id'))
+    return c.json({ ok: true })
+  })
+  app.post('/api/messages/read-all', async (c) => {
+    await services.store.markAllMessagesRead()
+    return c.json({ ok: true })
+  })
+
+  app.get('/api/schedules', async (c) => {
+    const rows = await services.store.listNotifySchedules()
+    return c.json(rows.map((row) => ({ ...row, enabled: Boolean(row.enabled) })))
+  })
+  app.post('/api/schedules', async (c) => {
+    const body = z.object({
+      workflowId: z.string().min(1),
+      intervalMinutes: z.number().int().positive().max(24 * 60).default(60),
+    }).parse(await c.req.json())
+    const workflow = await services.store.getWorkflow(body.workflowId)
+    if (!workflow) return c.json({ error: 'Workflow not found' }, 404)
+    return c.json(await services.store.createNotifySchedule(body), 201)
+  })
+  app.post('/api/schedules/:id/enabled', async (c) => {
+    const body = z.object({ enabled: z.boolean() }).parse(await c.req.json())
+    await services.store.setNotifyScheduleEnabled(c.req.param('id'), body.enabled)
+    return c.json({ ok: true })
+  })
+  app.delete('/api/schedules/:id', async (c) => {
+    await services.store.deleteNotifySchedule(c.req.param('id'))
+    return c.body(null, 204)
+  })
+
+  const enqueueByWorkflowId = async (workflowId: string) => {
+    const response = await app.request(`http://127.0.0.1/api/workflows/${workflowId}/execute`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${services.token}` },
+    })
+    if (!response.ok) {
+      const text = await response.text()
+      throw new Error(text || `schedule execute failed: ${response.status}`)
+    }
+    return response.json() as Promise<{ executionId: string }>
+  }
+
+  const scheduler = setInterval(() => {
+    void (async () => {
+      try {
+        const due = await services.store.dueNotifySchedules()
+        for (const item of due) {
+          await services.store.markNotifyScheduleRun(item.id, item.intervalMinutes)
+          console.log(`[schedule] trigger workflow=${item.workflowId} schedule=${item.id}`)
+          void enqueueByWorkflowId(item.workflowId).catch((error) => {
+            console.warn(`[schedule] execute failed workflow=${item.workflowId}`, error)
+          })
+        }
+      } catch (error) {
+        console.warn('[schedule] tick failed', error)
+      }
+    })()
+  }, 30_000)
+  scheduler.unref?.()
+
   app.get('/api/events', (c) => streamSSE(c, async (stream) => {
     let close = () => {}
     const heartbeat = setInterval(() => void stream.writeSSE({ event: 'heartbeat', data: '{}' }), 15_000)

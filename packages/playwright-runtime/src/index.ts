@@ -1,7 +1,14 @@
 import { z } from 'zod'
 import { chromium, type Browser, type Locator, type Page } from 'playwright'
 import { ToolRegistry } from '@workcopilot/tool-registry'
-import { selectorSchema, type ElementSelector, type SelectorScope } from '@workcopilot/workflow-engine'
+import {
+  compactSelectorText,
+  decodeHtmlEntities,
+  flexibleTextRegex,
+  selectorSchema,
+  type ElementSelector,
+  type SelectorScope,
+} from '@workcopilot/workflow-engine'
 
 const successSchema = z.object({
   success: z.boolean(),
@@ -27,6 +34,27 @@ function looksLikeBackNav(target: ElementSelector) {
 
 function looksLikeLoginSubmit(target: ElementSelector) {
   return /login-btn|sign[\s-]?in|登\s*录|登陆|submit/i.test(selectorBlob(target))
+}
+
+function compactMatchText(text: string): string {
+  return compactSelectorText(text)
+}
+
+/** Match extract page by origin + path; ignore volatile query/hash (sid, version, #mailbox). */
+export function pageMatchesRecordedUrl(current: string, recorded: string): boolean {
+  try {
+    const live = new URL(current)
+    const expected = new URL(recorded)
+    if (live.origin !== expected.origin) return false
+    const norm = (path: string) => path.replace(/\/+$/, '') || '/'
+    const livePath = norm(live.pathname)
+    const expectedPath = norm(expected.pathname)
+    return livePath === expectedPath
+      || livePath.startsWith(`${expectedPath}/`)
+      || expectedPath.startsWith(`${livePath}/`)
+  } catch {
+    return current === recorded
+  }
 }
 
 /**
@@ -64,9 +92,12 @@ export class PlaywrightRuntime {
   #closedNotified = false
 
   async #launchBrowser(): Promise<Browser> {
-    // Default headed so desktop / local replay shows a real browser window.
+    // Prefer installed Google Chrome (no Chrome-for-Testing "T" badge).
+    // Override with WORKCOPILOT_BROWSER_CHANNEL=chromium to use Playwright's bundle.
+    const channel = process.env.WORKCOPILOT_BROWSER_CHANNEL?.trim() || 'chrome'
     return chromium.launch({
       headless: process.env.WORKCOPILOT_HEADLESS === 'true',
+      ...(channel === 'chromium' ? {} : { channel }),
       handleSIGINT: false,
       handleSIGTERM: false,
       handleSIGHUP: false,
@@ -125,6 +156,162 @@ export class PlaywrightRuntime {
     })
   }
 
+  async adoptPage(page: Page, reason: string): Promise<Page> {
+    this.#attachPageCloseListener(page)
+    this.#page = page
+    console.log(`[playwright:page] adopted (${reason}) url=${page.url()}`)
+    return page
+  }
+
+  /**
+   * After a click that may open _blank / window.open / SSO in a new tab,
+   * switch the active page so later extract/click steps run on the destination.
+   */
+  async settleAfterClick(page: Page, beforeUrl: string, pagesBefore: Set<Page>, timeoutMs = 15_000): Promise<Page> {
+    const context = page.context()
+    const deadline = Date.now() + timeoutMs
+    const isUseful = (candidate: Page) => {
+      if (candidate.isClosed()) return false
+      const url = candidate.url()
+      return Boolean(url && /^https?:/i.test(url))
+    }
+
+    while (Date.now() < deadline) {
+      for (const candidate of context.pages()) {
+        if (pagesBefore.has(candidate)) continue
+        if (!isUseful(candidate)) continue
+        await candidate.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => undefined)
+        return this.adoptPage(candidate, 'new page after click')
+      }
+
+      if (!page.isClosed()) {
+        const now = page.url()
+        if (now && now !== beforeUrl) return page
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+
+    console.warn(
+      `[playwright:click] no navigation/popup within ${timeoutMs}ms — still at ${page.isClosed() ? '(closed)' : page.url()}`,
+    )
+    return page
+  }
+
+  /**
+   * Scroll the extracted node into view and mark it (bold + amber highlight + floating label)
+   * so the operator can see what was captured during workflow replay.
+   */
+  async highlightExtract(locator: Locator, value: string): Promise<void> {
+    await locator.scrollIntoViewIfNeeded({ timeout: 2_000 }).catch(() => undefined)
+    await locator.evaluate((element, text) => {
+      const host = element as HTMLElement
+      const prev = {
+        outline: host.style.outline,
+        outlineOffset: host.style.outlineOffset,
+        backgroundColor: host.style.backgroundColor,
+        fontWeight: host.style.fontWeight,
+        boxShadow: host.style.boxShadow,
+        transition: host.style.transition,
+        color: host.style.color,
+      }
+      host.dataset.workcopilotExtract = '1'
+      host.style.transition = 'outline 120ms ease, background-color 120ms ease, box-shadow 120ms ease'
+      host.style.outline = '3px solid #ca8a04'
+      host.style.outlineOffset = '3px'
+      host.style.backgroundColor = 'rgba(250, 204, 21, 0.5)'
+      host.style.fontWeight = '700'
+      host.style.color = '#713f12'
+      host.style.boxShadow = '0 0 0 6px rgba(250, 204, 21, 0.35)'
+
+      const bannerId = 'workcopilot-extract-banner'
+      document.getElementById(bannerId)?.remove()
+      const banner = document.createElement('div')
+      banner.id = bannerId
+      const label = text.length > 96 ? `${text.slice(0, 93)}…` : text
+      banner.textContent = `已提取：${label}`
+      Object.assign(banner.style, {
+        position: 'fixed',
+        zIndex: '2147483647',
+        maxWidth: 'min(480px, 90vw)',
+        padding: '8px 12px',
+        borderRadius: '8px',
+        background: '#713f12',
+        color: '#fef9c3',
+        font: '600 13px/1.35 system-ui, sans-serif',
+        boxShadow: '0 8px 24px rgba(0,0,0,0.25)',
+        pointerEvents: 'none',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+      } as Partial<CSSStyleDeclaration>)
+      const rect = host.getBoundingClientRect()
+      const top = Math.max(8, rect.top - 44)
+      const left = Math.min(Math.max(8, rect.left), window.innerWidth - 200)
+      banner.style.top = `${top}px`
+      banner.style.left = `${left}px`
+      document.documentElement.appendChild(banner)
+
+      window.setTimeout(() => banner.remove(), 5_000)
+      window.setTimeout(() => {
+        host.style.outline = prev.outline
+        host.style.outlineOffset = prev.outlineOffset
+        host.style.backgroundColor = prev.backgroundColor
+        host.style.fontWeight = prev.fontWeight
+        host.style.boxShadow = prev.boxShadow
+        host.style.transition = prev.transition
+        host.style.color = prev.color
+        delete host.dataset.workcopilotExtract
+      }, 8_000)
+    }, value)
+    // Brief pause so the highlight paints before the next step runs.
+    await new Promise((resolve) => setTimeout(resolve, 600))
+  }
+
+  /** Prefer / wait for a page that matches the URL recorded with an extract step. */
+  async ensurePageMatchingUrl(recordedUrl: string, timeoutMs = 15_000): Promise<Page> {
+    const active = await this.page()
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      for (const candidate of active.context().pages()) {
+        if (candidate.isClosed()) continue
+        if (!pageMatchesRecordedUrl(candidate.url(), recordedUrl)) continue
+        await candidate.waitForLoadState('domcontentloaded', { timeout: 8_000 }).catch(() => undefined)
+        return this.adoptPage(candidate, `extract url ${recordedUrl}`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    console.warn(
+      `[playwright:extract] no open page matched recorded url=${recordedUrl}; active=${active.url()}`,
+    )
+    return active
+  }
+
+  /** Run a locator attempt across every open page (preferring recordedUrl matches first). */
+  async withPages<T>(run: (page: Page) => Promise<T>, recordedUrl?: string): Promise<T> {
+    return this.withPage(async (active) => {
+      const pages = active.context().pages().filter((page) => !page.isClosed())
+      const preferred = recordedUrl
+        ? pages.filter((page) => pageMatchesRecordedUrl(page.url(), recordedUrl))
+        : []
+      const rest = pages.filter((page) => !preferred.includes(page))
+      const ordered = [
+        ...preferred,
+        ...[active, ...rest].filter((page) => !preferred.includes(page)),
+      ]
+      let lastError: unknown
+      for (const page of ordered) {
+        try {
+          const result = await run(page)
+          if (page !== this.#page) await this.adoptPage(page, 'match found on other page')
+          return result
+        } catch (error) {
+          lastError = error
+        }
+      }
+      throw lastError instanceof Error ? lastError : new Error(String(lastError ?? 'No page matched'))
+    })
+  }
+
   reset() {
     this.#page = undefined
     this.#browser = undefined
@@ -180,15 +367,34 @@ export class PlaywrightRuntime {
 
   /** Prefer a single visible match when selectors hit mobile+desktop duplicates. */
   async visibleLocator(page: Page, target: ElementSelector): Promise<Locator> {
-    const base = this.locator(page, target)
-    const visible = base.filter({ visible: true })
-    const visibleCount = await visible.count().catch(() => 0)
-    if (visibleCount === 1) return visible
-    if (visibleCount > 1) {
-      console.warn(`[playwright:locator] ${visibleCount} visible matches — using first visible`)
-      return visible.first()
+    const pick = async (candidate: ElementSelector) => {
+      const base = this.locator(page, candidate)
+      const visible = base.filter({ visible: true })
+      const visibleCount = await visible.count().catch(() => 0)
+      if (visibleCount === 1) return visible
+      if (visibleCount > 1) {
+        console.warn(`[playwright:locator] ${visibleCount} visible matches — using first visible`)
+        return visible.first()
+      }
+      const total = await base.count().catch(() => 0)
+      if (total > 0) return base.first()
+      return undefined
     }
-    return base.first()
+
+    const primary = await pick(target)
+    if (primary) return primary
+
+    // Parent scopes from recording are often brittle (layout wrappers). Retry leaf only.
+    if (target.parents?.length) {
+      const { parents: _parents, ...leaf } = target
+      const fallback = await pick(leaf)
+      if (fallback) {
+        console.warn('[playwright:locator] parent scope missed — retrying leaf selector only')
+        return fallback
+      }
+    }
+
+    return this.locator(page, target).first()
   }
 
   locateIn(scope: Page | Locator, target: SelectorScope | Omit<ElementSelector, 'parents' | 'confidence'>) {
@@ -197,11 +403,19 @@ export class PlaywrightRuntime {
       const { name, value } = target.stableAttribute
       return scope.locator(`[${name}=${JSON.stringify(value)}]`)
     }
+    const matchText = target.text ? compactMatchText(target.text) : undefined
+    const matchRe = matchText ? flexibleTextRegex(matchText) : undefined
+    // List tiles share a class — css alone is ambiguous; keep text as a filter.
+    if (target.css && matchRe) {
+      return scope.locator(target.css).filter({ hasText: matchRe })
+    }
     if (target.css) return scope.locator(target.css)
     if (target.ariaLabel) return scope.getByLabel(target.ariaLabel)
     if (target.placeholder) return scope.getByPlaceholder(target.placeholder)
-    if (target.role) return scope.getByRole(target.role as never, target.text ? { name: target.text } : {})
-    if (target.text) return scope.getByText(target.text, { exact: true })
+    if (target.role) {
+      return scope.getByRole(target.role as never, matchText ? { name: matchRe ?? matchText } : {})
+    }
+    if (matchRe) return scope.getByText(matchRe)
     if ('tag' in target && target.tag) return scope.locator(target.tag)
     throw new Error('No usable selector')
   }
@@ -402,26 +616,44 @@ export function registerBrowserTools(
       const locator = await runtime.visibleLocator(page, target)
       await locator.waitFor({ state: 'visible', timeout: 15_000 })
       const beforeUrl = page.url()
-      await Promise.all([
-        page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => undefined),
-        locator.click(),
-      ])
-      await runtime.waitForPageReady(page, 'after browser.click')
-      await runtime.logCookies('after browser.click', page)
+      const pagesBefore = new Set(page.context().pages())
+      const popupPromise = page.waitForEvent('popup', { timeout: 15_000 }).catch(() => null)
+
+      await locator.click({ timeout: 15_000 })
+
+      const popup = await popupPromise
+      let active = page
+      if (popup && !popup.isClosed()) {
+        const popupDeadline = Date.now() + 15_000
+        while (Date.now() < popupDeadline && !popup.isClosed() && !/^https?:/i.test(popup.url())) {
+          await new Promise((resolve) => setTimeout(resolve, 200))
+        }
+        if (!popup.isClosed() && /^https?:/i.test(popup.url())) {
+          active = await runtime.adoptPage(popup, 'popup after click')
+        } else {
+          active = await runtime.settleAfterClick(page, beforeUrl, pagesBefore, 10_000)
+        }
+      } else {
+        active = await runtime.settleAfterClick(page, beforeUrl, pagesBefore, 15_000)
+      }
+
+      await runtime.waitForPageReady(active, 'after browser.click')
+      await runtime.logCookies('after browser.click', active)
+      console.log(`[playwright:click] settled url=${active.url()} (before=${beforeUrl})`)
 
       if (looksLikeLoginSubmit(target)) {
         try {
-          await page.waitForURL((url) => !/\/login(\/|$|\?|#)/i.test(url.href), { timeout: 25_000 })
-          await runtime.waitForPageReady(page, 'after login navigation')
-          await runtime.logCookies('after login navigation', page)
+          await active.waitForURL((url) => !/\/login(\/|$|\?|#)/i.test(url.href), { timeout: 25_000 })
+          await runtime.waitForPageReady(active, 'after login navigation')
+          await runtime.logCookies('after login navigation', active)
         } catch {
           throw new Error(
-            `登录点击后仍停留在登录页（${page.url()}，点击前 ${beforeUrl}）。请检查账号密码，或页面是否有验证码/协议勾选。`,
+            `登录点击后仍停留在登录页（${active.url()}，点击前 ${beforeUrl}）。请检查账号密码，或页面是否有验证码/协议勾选。`,
           )
         }
       }
 
-      return { success: true, url: page.url() }
+      return { success: true, url: active.url() }
     }),
   })
   registry.register({
@@ -479,16 +711,78 @@ export function registerBrowserTools(
   })
   registry.register({
     name: 'browser.extract', description: 'Extract text from an element',
-    inputSchema: z.object({ target: selectorSchema }), outputSchema: successSchema,
-    execute: async ({ target }) => runtime.withPage(async (page) => {
-      const locator = await runtime.visibleLocator(page, target)
-      await locator.waitFor({ state: 'visible', timeout: 15_000 })
-      return {
-        success: true,
-        value: await locator.textContent(),
-        url: page.url(),
-      }
+    inputSchema: z.object({
+      target: selectorSchema,
+      /** Page URL where the extract was recorded — used to pick the right tab after click/_blank. */
+      url: z.string().url().optional(),
     }),
+    outputSchema: successSchema,
+    execute: async ({ target, url: pageUrl }) => {
+      if (pageUrl) {
+        await runtime.ensurePageMatchingUrl(pageUrl, 15_000)
+      }
+      return runtime.withPages(async (page) => {
+        await runtime.waitForPageReady(page, 'before browser.extract')
+        const tryRead = async (locator: Locator, timeoutMs = 5_000) => {
+          await locator.waitFor({ state: 'attached', timeout: timeoutMs })
+          await locator.waitFor({ state: 'visible', timeout: Math.min(2_000, timeoutMs) }).catch(() => undefined)
+          const raw = await locator.innerText().catch(async () => (await locator.textContent()) ?? '')
+          return decodeHtmlEntities(raw).replace(/\s+/g, ' ').trim()
+        }
+
+        const finish = async (locator: Locator, value: string) => {
+          await runtime.highlightExtract(locator, value).catch((error) => {
+            console.warn('[playwright:extract] highlight failed', error)
+          })
+          return { success: true as const, value, url: page.url() }
+        }
+
+        const describe = () => {
+          const bits = [
+            target.css && `css=${target.css}`,
+            target.text && `text=${target.text}`,
+            target.parents?.length && `parents=${target.parents.length}`,
+            pageUrl && `recordedUrl=${pageUrl}`,
+            `url=${page.url()}`,
+          ].filter(Boolean)
+          return bits.join(' ') || '(empty target)'
+        }
+
+        try {
+          const locator = await runtime.visibleLocator(page, target)
+          const value = await tryRead(locator)
+          if (!value) throw new Error(`Extract matched an empty node (${describe()})`)
+          return finish(locator, value)
+        } catch (error) {
+          if (!target.text) throw error
+          const matchRe = flexibleTextRegex(compactMatchText(target.text))
+          if (target.css) {
+            try {
+              const byCss = page.locator(target.css).filter({ hasText: matchRe }).first()
+              const value = await tryRead(byCss)
+              if (value) {
+                console.warn(`[playwright:extract] fell back to css + flexible text on ${page.url()}`)
+                return finish(byCss, value)
+              }
+            } catch {
+              // continue
+            }
+          }
+          try {
+            const byText = page.getByText(matchRe).first()
+            const value = await tryRead(byText)
+            if (value) {
+              console.warn(`[playwright:extract] fell back to flexible getByText on ${page.url()}`)
+              return finish(byText, value)
+            }
+          } catch {
+            // continue
+          }
+          const message = error instanceof Error ? error.message : String(error)
+          throw new Error(`Extract failed (${describe()}): ${message}`)
+        }
+      }, pageUrl)
+    },
   })
   registry.register({
     name: 'browser.snapshot', description: 'Capture basic page metadata',
