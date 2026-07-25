@@ -1,9 +1,11 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -65,9 +67,62 @@ fn get_or_create_runtime_token() -> Result<String, String> {
     Ok(token)
 }
 
+fn runtime_already_up() -> bool {
+    TcpStream::connect_timeout(
+        &"127.0.0.1:4317".parse().expect("valid addr"),
+        Duration::from_millis(200),
+    )
+    .is_ok()
+}
+
+fn looks_like_workspace(root: &PathBuf) -> bool {
+    root.join("packages/agent-core/package.json").is_file() && root.join("pnpm-workspace.yaml").is_file()
+}
+
+fn resolve_workspace() -> Option<PathBuf> {
+    if let Ok(custom) = std::env::var("WORKCOPILOT_WORKSPACE") {
+        let path = PathBuf::from(custom);
+        if looks_like_workspace(&path) {
+            return Some(path);
+        }
+    }
+
+    let from_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    if looks_like_workspace(&from_manifest) {
+        return Some(from_manifest);
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut cursor = Some(cwd.as_path());
+        while let Some(dir) = cursor {
+            let candidate = dir.to_path_buf();
+            if looks_like_workspace(&candidate) {
+                return Some(candidate);
+            }
+            cursor = dir.parent();
+        }
+    }
+
+    None
+}
+
 fn spawn_runtime() -> Option<Child> {
+    if runtime_already_up() {
+        eprintln!("[desktop] runtime already listening on 127.0.0.1:4317");
+        return None;
+    }
+
+    let workspace = match resolve_workspace() {
+        Some(path) => path,
+        None => {
+            eprintln!(
+                "[desktop] workspace not found; start runtime manually with `pnpm runtime` (or set WORKCOPILOT_WORKSPACE)"
+            );
+            return None;
+        }
+    };
+
     let command_name = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
-    let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let mut command = Command::new(command_name);
     command
         .args(["--filter", "@workcopilot/agent-core", "dev"])
@@ -76,14 +131,14 @@ fn spawn_runtime() -> Option<Child> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let mut child = command.spawn().ok()?;
+    // Avoid CREATE_NO_WINDOW with *.cmd — it often prevents pnpm from starting on Windows.
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("[desktop] failed to spawn runtime: {error}");
+            return None;
+        }
+    };
     pipe_runtime_logs(child.stdout.take(), "stdout");
     pipe_runtime_logs(child.stderr.take(), "stderr");
     eprintln!(

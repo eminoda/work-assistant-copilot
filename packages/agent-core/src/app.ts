@@ -395,10 +395,24 @@ async function tryLoginSessionReuse(input: {
   }
 }
 
+function isAllowedCorsOrigin(origin: string): boolean {
+  if (!origin) return false
+  return (
+    origin.startsWith('chrome-extension://')
+    || origin.startsWith('tauri://')
+    || origin.startsWith('http://localhost')
+    || origin.startsWith('https://localhost')
+    || origin.startsWith('http://127.0.0.1')
+    || origin.startsWith('https://127.0.0.1')
+    || origin.startsWith('http://tauri.localhost')
+    || origin.startsWith('https://tauri.localhost')
+  )
+}
+
 export function createApp(services: AppServices) {
   const app = new Hono()
   app.use('*', cors({
-    origin: (origin) => origin.startsWith('chrome-extension://') || origin.startsWith('http://localhost') || origin.startsWith('tauri://') ? origin : '',
+    origin: (origin) => (isAllowedCorsOrigin(origin) ? origin : ''),
     allowHeaders: ['authorization', 'content-type'],
   }))
   app.get('/api/health', (c) => c.json({ status: 'ok', version: '0.1.0' }))

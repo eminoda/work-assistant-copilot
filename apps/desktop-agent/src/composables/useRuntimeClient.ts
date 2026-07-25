@@ -115,10 +115,17 @@ export function useRuntimeClient() {
     const trimmed = nextToken.trim()
     if (!trimmed) throw new Error('请输入 runtime token')
 
-    const health = await fetch(`${baseUrl}/api/health`).then(async (response) => {
+    let health: { status?: string }
+    try {
+      const response = await fetch(`${baseUrl}/api/health`)
       if (!response.ok) throw new Error('Runtime 未启动')
-      return response.json()
-    })
+      health = await response.json()
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Runtime 未启动') throw error
+      throw new Error(
+        '无法连接本地 Runtime（http://127.0.0.1:4317）。请先运行 pnpm runtime，或从源码目录启动桌面端以便自动拉起。',
+      )
+    }
     if (health.status !== 'ok') throw new Error('Runtime 不可用')
 
     token.value = trimmed
@@ -135,7 +142,7 @@ export function useRuntimeClient() {
     connected.value = true
   }
 
-  async function autoConnect(retries = 12, delayMs = 500) {
+  async function autoConnect(retries = 20, delayMs = 500) {
     await ensureLocalToken()
     const saved = token.value.trim()
     if (!saved) return

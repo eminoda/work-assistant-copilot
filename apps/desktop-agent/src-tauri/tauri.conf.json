@@ -11,7 +11,9 @@
   },
   "app": {
     "windows": [{ "title": "WorkCopilot", "width": 1180, "height": 760, "minWidth": 860, "minHeight": 600 }],
-    "security": { "csp": "default-src 'self'; connect-src http://127.0.0.1:4317; img-src 'self' asset: data:" }
+    "security": {
+      "csp": "default-src 'self'; connect-src http://127.0.0.1:4317 http://localhost:4317 ws://127.0.0.1:4317 ws://localhost:4317; img-src 'self' asset: data:"
+    }
   },
   "bundle": {
     "active": true,
