@@ -117,21 +117,51 @@ export async function discoverGitRepos(
 
 /** Commits authored on the local calendar day `date` (YYYY-MM-DD). */
 export async function commitsOnDate(root: string, date: string): Promise<string[]> {
-  const since = `${date}T00:00:00`
+  const meta = await listCommits(root, { date })
+  return meta.map((item) => item.id)
+}
+
+export const commitMetaSchema = z.object({
+  id: z.string().min(1),
+  subject: z.string(),
+  authoredAt: z.string(),
+})
+export type CommitMeta = z.infer<typeof commitMetaSchema>
+
+function nextDayStart(date: string): string {
   const untilDate = new Date(`${date}T12:00:00`)
   untilDate.setDate(untilDate.getDate() + 1)
   const y = untilDate.getFullYear()
   const m = String(untilDate.getMonth() + 1).padStart(2, '0')
   const d = String(untilDate.getDate()).padStart(2, '0')
-  const until = `${y}-${m}-${d}T00:00:00`
-  const out = await git(root, [
-    'log',
-    `--since=${since}`,
-    `--until=${until}`,
-    '--pretty=%H',
-    '--no-merges',
-  ]).catch(() => '')
-  return out.split(/\r?\n/).filter(Boolean)
+  return `${y}-${m}-${d}T00:00:00`
+}
+
+/**
+ * List commits with id / subject / authoredAt.
+ * Prefer `date` (calendar day) or `since`+`until` (ISO-ish local timestamps).
+ */
+export async function listCommits(
+  root: string,
+  options: { date?: string; since?: string; until?: string; maxCount?: number } = {},
+): Promise<CommitMeta[]> {
+  const args = ['log', '--pretty=%H%x09%aI%x09%s', '--no-merges']
+  if (options.date) {
+    args.push(`--since=${options.date}T00:00:00`, `--until=${nextDayStart(options.date)}`)
+  } else {
+    if (options.since) args.push(`--since=${options.since}`)
+    if (options.until) args.push(`--until=${options.until}`)
+  }
+  if (options.maxCount && options.maxCount > 0) args.push(`-n${options.maxCount}`)
+  const out = await git(root, args).catch(() => '')
+  return out.split(/\r?\n/).filter(Boolean).map((line) => {
+    const [id, authoredAt, ...rest] = line.split('\t')
+    return commitMetaSchema.parse({
+      id: id ?? '',
+      authoredAt: authoredAt ?? '',
+      subject: rest.join('\t') || '(no subject)',
+    })
+  })
 }
 
 /** Files + truncated unified diff for the given commits. */

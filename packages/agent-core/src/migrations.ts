@@ -87,8 +87,27 @@ export const initialSchemaStatements = [
     "date" TEXT NOT NULL,
     "items" JSONB NOT NULL,
     "rawMarkdown" TEXT NOT NULL DEFAULT '',
+    "contentHash" TEXT NOT NULL DEFAULT '',
+    "aiMarkdown" TEXT NOT NULL DEFAULT '',
+    "aiContentHash" TEXT NOT NULL DEFAULT '',
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`,
   `CREATE UNIQUE INDEX IF NOT EXISTS "DailyJournal_date_key" ON "DailyJournal"("date")`,
+  `CREATE TABLE IF NOT EXISTS "AiUsageDaily" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "date" TEXT NOT NULL,
+    "callCount" INTEGER NOT NULL DEFAULT 0,
+    "inputChars" INTEGER NOT NULL DEFAULT 0,
+    "outputChars" INTEGER NOT NULL DEFAULT 0,
+    "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS "AiUsageDaily_date_key" ON "AiUsageDaily"("date")`,
+] as const
+
+/** Additive columns for existing DBs (SQLite ignores failures if column exists). */
+export const journalColumnMigrations = [
+  `ALTER TABLE "DailyJournal" ADD COLUMN "contentHash" TEXT NOT NULL DEFAULT ''`,
+  `ALTER TABLE "DailyJournal" ADD COLUMN "aiMarkdown" TEXT NOT NULL DEFAULT ''`,
+  `ALTER TABLE "DailyJournal" ADD COLUMN "aiContentHash" TEXT NOT NULL DEFAULT ''`,
 ] as const

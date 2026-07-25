@@ -10,8 +10,21 @@ import {
 } from '@workcopilot/memory-engine'
 import type { DailyJournal } from '../journalTypes'
 
+type SummarizeResult = {
+  skipped: boolean
+  reason?: string
+  summary: string
+  bullets: string[]
+  raw: string
+}
+
 const props = defineProps<{
   listJournals: (from: string, to: string) => Promise<DailyJournal[]>
+  summarizeJournals: (
+    from: string,
+    to: string,
+    kind: 'monthly' | 'weekly' | 'range',
+  ) => Promise<SummarizeResult>
 }>()
 
 const emit = defineEmits<{
@@ -43,9 +56,28 @@ const journals = shallowRef<DailyJournal[]>([])
 const loading = shallowRef(false)
 const error = shallowRef('')
 
+const weeklyBusy = shallowRef(false)
+const weeklyError = shallowRef('')
+const weeklySummary = shallowRef('')
+const weeklyBullets = shallowRef<string[]>([])
+
+const monthlyBusy = shallowRef(false)
+const monthlyError = shallowRef('')
+const monthlySummary = shallowRef('')
+const monthlyBullets = shallowRef<string[]>([])
+
 const selectedMonth = computed(() =>
   months.find((item) => item.label === selectedLabel.value) ?? months[0] ?? null,
 )
+
+const monthRange = computed(() => {
+  const month = selectedMonth.value
+  if (!month) return null
+  const from = `${month.year}-${String(month.month).padStart(2, '0')}-01`
+  const last = new Date(month.year, month.month, 0).getDate()
+  const to = `${month.year}-${String(month.month).padStart(2, '0')}-${String(last).padStart(2, '0')}`
+  return { from, to }
+})
 
 /** Weeks that have at least one day ≤ today. */
 const weeksDesc = computed<NaturalWeek[]>(() => {
@@ -73,25 +105,93 @@ const daysInWeek = computed(() => {
     .sort((a, b) => b.localeCompare(a))
 })
 
+const weekHasJournals = computed(() => daysInWeek.value.length > 0)
+
 function itemCount(date: string): number {
   return journals.value.find((item) => item.date === date)?.items.length ?? 0
 }
 
+function resetWeekly() {
+  weeklySummary.value = ''
+  weeklyBullets.value = []
+  weeklyError.value = ''
+}
+
+function resetMonthly() {
+  monthlySummary.value = ''
+  monthlyBullets.value = []
+  monthlyError.value = ''
+}
+
 async function loadMonth() {
   const month = selectedMonth.value
-  if (!month) return
+  const range = monthRange.value
+  if (!month || !range) return
   loading.value = true
   error.value = ''
-  const from = `${month.year}-${String(month.month).padStart(2, '0')}-01`
-  const last = new Date(month.year, month.month, 0).getDate()
-  const to = `${month.year}-${String(month.month).padStart(2, '0')}-${String(last).padStart(2, '0')}`
+  resetWeekly()
+  resetMonthly()
   try {
-    journals.value = await props.listJournals(from, to)
+    journals.value = await props.listJournals(range.from, range.to)
     activeWeekIndex.value = weeksDesc.value[0]?.weekIndex ?? null
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function runWeeklySummary() {
+  const week = activeWeek.value
+  if (!week) return
+  if (!weekHasJournals.value) {
+    weeklyError.value = '本周暂无日报，无法生成周报'
+    return
+  }
+  const from = week.start
+  const to = week.dates.filter((date) => date <= today).sort().at(-1) ?? week.end
+  weeklyBusy.value = true
+  weeklyError.value = ''
+  try {
+    const result = await props.summarizeJournals(from, to, 'weekly')
+    if (result.skipped) {
+      weeklyError.value = result.summary || '暂无可总结内容'
+      weeklySummary.value = ''
+      weeklyBullets.value = []
+    } else {
+      weeklySummary.value = result.summary
+      weeklyBullets.value = result.bullets
+    }
+  } catch (err) {
+    weeklyError.value = err instanceof Error ? err.message : '周报生成失败'
+  } finally {
+    weeklyBusy.value = false
+  }
+}
+
+async function runMonthlySummary() {
+  const range = monthRange.value
+  if (!range) return
+  if (!journals.value.length) {
+    monthlyError.value = '本月暂无日报，无法生成月报'
+    return
+  }
+  monthlyBusy.value = true
+  monthlyError.value = ''
+  try {
+    const result = await props.summarizeJournals(range.from, range.to, 'monthly')
+    if (result.skipped) {
+      monthlyError.value = result.summary || '暂无可总结内容'
+      monthlySummary.value = ''
+      monthlyBullets.value = []
+    } else {
+      monthlySummary.value = result.summary
+      monthlyBullets.value = result.bullets
+    }
+  } catch (err) {
+    monthlyError.value = err instanceof Error ? err.message : '月报生成失败'
+  } finally {
+    monthlyBusy.value = false
   }
 }
 
@@ -103,6 +203,10 @@ watch(weeksDesc, (weeks) => {
   if (!weeks.some((week) => week.weekIndex === activeWeekIndex.value)) {
     activeWeekIndex.value = weeks[0]?.weekIndex ?? null
   }
+})
+
+watch(activeWeekIndex, () => {
+  resetWeekly()
 })
 
 onMounted(() => {
@@ -118,7 +222,7 @@ onMounted(() => {
           <path fill="currentColor" d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z" />
         </svg>
       </button>
-      <strong>周报</strong>
+      <strong>日报</strong>
       <button
         class="text-btn report-add-today"
         type="button"
@@ -182,6 +286,59 @@ onMounted(() => {
         </div>
       </div>
       <p v-else class="hint">该月暂无可展示的周</p>
+
+      <section class="month-summary card">
+        <div class="row summary-head">
+          <strong>AI 汇总</strong>
+          <div class="summary-btns">
+            <button
+              class="secondary"
+              type="button"
+              :disabled="weeklyBusy || !weekHasJournals"
+              @click="runWeeklySummary"
+            >
+              {{ weeklyBusy ? '生成中…' : '生成周报' }}
+            </button>
+            <button
+              class="secondary"
+              type="button"
+              :disabled="monthlyBusy || !journals.length"
+              @click="runMonthlySummary"
+            >
+              {{ monthlyBusy ? '生成中…' : '生成月报' }}
+            </button>
+          </div>
+        </div>
+        <p class="hint">
+          周报对应当前第{{ activeWeek?.weekIndex }}周
+          <template v-if="activeWeek">
+            （{{ formatMmDd(activeWeek.start) }}–{{ formatMmDd(activeWeek.end) }}）
+          </template>
+          ；月报对应整月日报。
+        </p>
+
+        <div v-if="weeklyError || weeklySummary || weeklyBullets.length" class="summary-block">
+          <div class="summary-block-title">周报</div>
+          <p v-if="weeklyError" class="error">{{ weeklyError }}</p>
+          <template v-else>
+            <p v-if="weeklySummary" class="ai-summary-text">{{ weeklySummary }}</p>
+            <ul v-if="weeklyBullets.length">
+              <li v-for="(bullet, index) in weeklyBullets" :key="`w-${index}`">{{ bullet }}</li>
+            </ul>
+          </template>
+        </div>
+
+        <div v-if="monthlyError || monthlySummary || monthlyBullets.length" class="summary-block">
+          <div class="summary-block-title">月报</div>
+          <p v-if="monthlyError" class="error">{{ monthlyError }}</p>
+          <template v-else>
+            <p v-if="monthlySummary" class="ai-summary-text">{{ monthlySummary }}</p>
+            <ul v-if="monthlyBullets.length">
+              <li v-for="(bullet, index) in monthlyBullets" :key="`m-${index}`">{{ bullet }}</li>
+            </ul>
+          </template>
+        </div>
+      </section>
     </article>
   </section>
 </template>

@@ -3,9 +3,9 @@ import { join } from 'node:path'
 import { PrismaClient, type Prisma } from '@prisma/client'
 import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3'
 import { workflowSchema, workflowStepSchema, type ExecutionResult, type Workflow } from '@workcopilot/workflow-engine'
-import { memoryRecordSchema, type MemoryRecord, dailyJournalSchema, type DailyJournal, mergeJournalItem, appendRawMarkdown } from '@workcopilot/memory-engine'
+import { memoryRecordSchema, type MemoryRecord, dailyJournalSchema, type DailyJournal, mergeJournalItem, appendRawMarkdown, hashGitJournalContent, localToday } from '@workcopilot/memory-engine'
 import { workCopilotHome } from '@workcopilot/credential-provider'
-import { initialSchemaStatements } from './migrations.js'
+import { initialSchemaStatements, journalColumnMigrations } from './migrations.js'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 
@@ -94,6 +94,13 @@ export class WorkCopilotStore {
   async connect() {
     await this.db.$connect()
     for (const statement of initialSchemaStatements) await this.db.$executeRawUnsafe(statement)
+    for (const statement of journalColumnMigrations) {
+      try {
+        await this.db.$executeRawUnsafe(statement)
+      } catch {
+        // column already exists on upgraded DBs
+      }
+    }
   }
   async close() { await this.db.$disconnect() }
 
@@ -191,6 +198,106 @@ export class WorkCopilotStore {
   async createProject(input: { name: string; path: string; gitUrl?: string }) { return this.db.project.create({ data: input }) }
   async getProject(id: string) { return this.db.project.findUnique({ where: { id } }) }
 
+  async listProjectSnapshots(projectId: string, limit = 20) {
+    return this.db.gitSnapshot.findMany({
+      where: { projectId },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    })
+  }
+
+  async listRecordings() {
+    return this.db.recording.findMany({
+      select: {
+        id: true,
+        name: true,
+        intent: true,
+        url: true,
+        status: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+  }
+
+  async getRecording(id: string) {
+    return this.db.recording.findUnique({ where: { id } })
+  }
+
+  async recordAiUsage(input: { inputChars: number; outputChars: number; date?: string }) {
+    const date = input.date ?? localToday()
+    const inputChars = Math.max(0, Math.floor(input.inputChars))
+    const outputChars = Math.max(0, Math.floor(input.outputChars))
+    const existing = await this.db.$queryRawUnsafe<Array<{
+      id: string
+      callCount: number
+      inputChars: number
+      outputChars: number
+    }>>(`SELECT "id", "callCount", "inputChars", "outputChars" FROM "AiUsageDaily" WHERE "date" = ? LIMIT 1`, date)
+    const now = new Date().toISOString()
+    if (existing[0]) {
+      await this.db.$executeRawUnsafe(
+        `UPDATE "AiUsageDaily" SET "callCount" = ?, "inputChars" = ?, "outputChars" = ?, "updatedAt" = ? WHERE "date" = ?`,
+        Number(existing[0].callCount) + 1,
+        Number(existing[0].inputChars) + inputChars,
+        Number(existing[0].outputChars) + outputChars,
+        now,
+        date,
+      )
+      return
+    }
+    await this.db.$executeRawUnsafe(
+      `INSERT INTO "AiUsageDaily" ("id", "date", "callCount", "inputChars", "outputChars", "updatedAt") VALUES (?, ?, ?, ?, ?, ?)`,
+      randomUUID(),
+      date,
+      1,
+      inputChars,
+      outputChars,
+      now,
+    )
+  }
+
+  async listAiUsage(days = 7): Promise<Array<{
+    date: string
+    callCount: number
+    inputChars: number
+    outputChars: number
+  }>> {
+    const count = Math.max(1, Math.min(31, days))
+    const end = localToday()
+    const cursor = new Date(`${end}T12:00:00`)
+    const dates: string[] = []
+    for (let i = 0; i < count; i += 1) {
+      const y = cursor.getFullYear()
+      const m = String(cursor.getMonth() + 1).padStart(2, '0')
+      const d = String(cursor.getDate()).padStart(2, '0')
+      dates.push(`${y}-${m}-${d}`)
+      cursor.setDate(cursor.getDate() - 1)
+    }
+    const from = dates[dates.length - 1]!
+    const rows = await this.db.$queryRawUnsafe<Array<{
+      date: string
+      callCount: number
+      inputChars: number
+      outputChars: number
+    }>>(
+      `SELECT "date", "callCount", "inputChars", "outputChars" FROM "AiUsageDaily" WHERE "date" >= ? AND "date" <= ?`,
+      from,
+      end,
+    )
+    const byDate = new Map(rows.map((row) => [row.date, row]))
+    return dates.reverse().map((date) => {
+      const row = byDate.get(date)
+      return {
+        date,
+        callCount: Number(row?.callCount ?? 0),
+        inputChars: Number(row?.inputChars ?? 0),
+        outputChars: Number(row?.outputChars ?? 0),
+      }
+    })
+  }
+
   async saveMemory(input: Omit<MemoryRecord, 'id'>): Promise<MemoryRecord> {
     const row = await this.db.dailyMemory.create({
       data: { date: input.date, content: input.content, source: input.source, metadata: input.metadata as Prisma.InputJsonValue },
@@ -213,6 +320,9 @@ export class WorkCopilotStore {
     date: string
     items: string | unknown
     rawMarkdown: string
+    contentHash?: string | null
+    aiMarkdown?: string | null
+    aiContentHash?: string | null
     createdAt: string | Date
     updatedAt: string | Date
   }): DailyJournal {
@@ -223,6 +333,9 @@ export class WorkCopilotStore {
       date: row.date,
       items: itemsRaw,
       rawMarkdown: row.rawMarkdown ?? '',
+      contentHash: row.contentHash ?? '',
+      aiMarkdown: row.aiMarkdown ?? '',
+      aiContentHash: row.aiContentHash ?? '',
       createdAt: toIso(row.createdAt),
       updatedAt: toIso(row.updatedAt),
     })
@@ -234,6 +347,9 @@ export class WorkCopilotStore {
       date: string
       items: string
       rawMarkdown: string
+      contentHash: string
+      aiMarkdown: string
+      aiContentHash: string
       createdAt: string
       updatedAt: string
     }>>(
@@ -251,6 +367,9 @@ export class WorkCopilotStore {
       date: string
       items: string
       rawMarkdown: string
+      contentHash: string
+      aiMarkdown: string
+      aiContentHash: string
       createdAt: string
       updatedAt: string
     }>>(`SELECT * FROM "DailyJournal" WHERE "date" = ? LIMIT 1`, date)
@@ -264,11 +383,14 @@ export class WorkCopilotStore {
     const id = randomUUID()
     const now = new Date().toISOString()
     await this.db.$executeRawUnsafe(
-      `INSERT INTO "DailyJournal" ("id", "date", "items", "rawMarkdown", "createdAt", "updatedAt")
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO "DailyJournal" ("id", "date", "items", "rawMarkdown", "contentHash", "aiMarkdown", "aiContentHash", "createdAt", "updatedAt")
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       date,
       JSON.stringify([]),
+      '',
+      '',
+      '',
       '',
       now,
       now,
@@ -295,13 +417,47 @@ export class WorkCopilotStore {
       ? appendRawMarkdown(journal.rawMarkdown, input.rawSection)
       : appendRawMarkdown(
         journal.rawMarkdown,
-        `## ${input.title.trim()}\n\n- ${input.description.trim()}`,
+        `## ${input.title.trim()}\n\n${input.description.trim()}`,
       )
     const now = new Date().toISOString()
     await this.db.$executeRawUnsafe(
       `UPDATE "DailyJournal" SET "items" = ?, "rawMarkdown" = ?, "updatedAt" = ? WHERE "date" = ?`,
       JSON.stringify(items),
       rawMarkdown,
+      now,
+      input.date,
+    )
+    if (input.source === 'GIT') {
+      return this.refreshJournalContentHash(input.date)
+    }
+    return (await this.getJournal(input.date))!
+  }
+
+  async refreshJournalContentHash(date: string): Promise<DailyJournal> {
+    const journal = await this.ensureJournal(date)
+    const contentHash = hashGitJournalContent(journal)
+    const now = new Date().toISOString()
+    await this.db.$executeRawUnsafe(
+      `UPDATE "DailyJournal" SET "contentHash" = ?, "updatedAt" = ? WHERE "date" = ?`,
+      contentHash,
+      now,
+      date,
+    )
+    return (await this.getJournal(date))!
+  }
+
+  async saveJournalAiMarkdown(input: {
+    date: string
+    aiMarkdown: string
+    contentHash: string
+  }): Promise<DailyJournal> {
+    await this.ensureJournal(input.date)
+    const now = new Date().toISOString()
+    await this.db.$executeRawUnsafe(
+      `UPDATE "DailyJournal" SET "aiMarkdown" = ?, "aiContentHash" = ?, "contentHash" = ?, "updatedAt" = ? WHERE "date" = ?`,
+      input.aiMarkdown,
+      input.contentHash,
+      input.contentHash,
       now,
       input.date,
     )
@@ -344,7 +500,9 @@ export class WorkCopilotStore {
       orderBy: { createdAt: 'desc' },
     })
   }
-  async createModelProvider(input: {
+
+  /** Keep a single provider row; return credential keys that were removed. */
+  async replaceModelProvider(input: {
     name: string
     providerType: string
     baseUrl?: string
@@ -352,8 +510,9 @@ export class WorkCopilotStore {
     model: string
     enabled: boolean
   }) {
-    if (input.enabled) await this.db.modelProvider.updateMany({ data: { enabled: false } })
-    return this.db.modelProvider.create({
+    const existing = await this.db.modelProvider.findMany({ select: { credentialKey: true } })
+    await this.db.modelProvider.deleteMany({})
+    const provider = await this.db.modelProvider.create({
       data: {
         name: input.name,
         providerType: input.providerType,
@@ -363,6 +522,50 @@ export class WorkCopilotStore {
         ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}),
       },
     })
+    return {
+      provider,
+      removedCredentialKeys: existing.map((row) => row.credentialKey),
+    }
+  }
+
+  /** Drop duplicate history rows; keep newest enabled (or newest) and optionally rewrite baseUrl. */
+  async pruneModelProviders(normalizeBaseUrl?: (url: string | null) => string | undefined) {
+    const all = await this.db.modelProvider.findMany({ orderBy: [{ enabled: 'desc' }, { updatedAt: 'desc' }] })
+    if (!all.length) return { providers: [], removedCredentialKeys: [] as string[] }
+
+    const keep = all.find((row) => row.enabled) ?? all[0]!
+    const removed = all.filter((row) => row.id !== keep.id)
+    if (removed.length) {
+      await this.db.modelProvider.deleteMany({ where: { id: { in: removed.map((row) => row.id) } } })
+    }
+
+    const nextBase = normalizeBaseUrl ? normalizeBaseUrl(keep.baseUrl) : (keep.baseUrl ?? undefined)
+    const baseChanged = (nextBase ?? null) !== (keep.baseUrl ?? null)
+    if (baseChanged || !keep.enabled) {
+      await this.db.modelProvider.update({
+        where: { id: keep.id },
+        data: {
+          enabled: true,
+          baseUrl: nextBase ?? null,
+        },
+      })
+    }
+
+    return {
+      providers: await this.listModelProviders(),
+      removedCredentialKeys: removed.map((row) => row.credentialKey),
+    }
+  }
+
+  async createModelProvider(input: {
+    name: string
+    providerType: string
+    baseUrl?: string
+    credentialKey: string
+    model: string
+    enabled: boolean
+  }) {
+    return (await this.replaceModelProvider(input)).provider
   }
   async enabledModelProvider() {
     return this.db.modelProvider.findFirst({ where: { enabled: true }, orderBy: { updatedAt: 'desc' } })

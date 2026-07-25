@@ -46,7 +46,7 @@ const emit = defineEmits<{
           />
         </svg>
       </span>
-      <span class="action-label">周报</span>
+      <span class="action-label">日报</span>
     </button>
 
     <button class="action-tile" type="button" @click="emit('chat')">

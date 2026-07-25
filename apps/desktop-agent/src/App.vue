@@ -1,31 +1,54 @@
 <script setup lang="ts">
 import { onMounted, shallowRef } from 'vue'
 import AppSidebar from './components/AppSidebar.vue'
-import DashboardView from './components/DashboardView.vue'
-import DataListView from './components/DataListView.vue'
-import ChatView from './components/ChatView.vue'
 import SettingsView from './components/SettingsView.vue'
+import AnalyticsView from './components/AnalyticsView.vue'
+import ProjectsView from './components/ProjectsView.vue'
+import RecordingsView from './components/RecordingsView.vue'
 import { useRuntimeClient } from './composables/useRuntimeClient'
-const active = shallowRef('Dashboard')
+
+const active = shallowRef('Settings')
 const runtime = useRuntimeClient()
 window.__workcopilotRequest = runtime.request
-const endpoints: Record<string, string> = { Workflows: '/api/workflows', Memory: '/api/memories', Projects: '/api/projects' }
 
 onMounted(() => {
   void runtime.autoConnect()
 })
 </script>
+
 <template>
   <div class="app-shell">
     <AppSidebar :active="active" :connected="runtime.connected.value" @navigate="active = $event" />
     <main class="content">
-      <DashboardView v-if="active === 'Dashboard'" :connected="runtime.connected.value" />
-      <DataListView v-else-if="endpoints[active]" :title="active" :endpoint="endpoints[active]!" />
-      <ChatView v-else-if="active === 'Chat'" />
       <SettingsView
-        v-else-if="active === 'Settings'"
+        v-if="active === 'Settings'"
         :connected="runtime.connected.value"
+        :initial-token="runtime.token.value"
         :connect="runtime.connect"
+        :get-settings="runtime.getSettings"
+        :set-scan-roots="runtime.setScanRoots"
+        :list-models="runtime.listModels"
+        :save-model="runtime.saveModel"
+        :trigger-scan="runtime.triggerJournalScan"
+      />
+      <AnalyticsView
+        v-else-if="active === 'Analytics'"
+        :connected="runtime.connected.value"
+        :list-usage="runtime.listUsage"
+      />
+      <ProjectsView
+        v-else-if="active === 'Projects'"
+        :connected="runtime.connected.value"
+        :list-projects="runtime.listProjects"
+        :get-project="runtime.getProject"
+      />
+      <RecordingsView
+        v-else-if="active === 'Recordings'"
+        :connected="runtime.connected.value"
+        :list-workflows="runtime.listWorkflows"
+        :get-workflow="runtime.getWorkflow"
+        :list-recordings="runtime.listRecordings"
+        :get-recording="runtime.getRecording"
       />
     </main>
   </div>

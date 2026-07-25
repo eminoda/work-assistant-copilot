@@ -11,11 +11,26 @@ import { recordingSchema, recordingToWorkflow, sortRecordingEvents, lastRecorded
 import { registerBrowserTools, PlaywrightRuntime, shouldSkipNavigation } from '@workcopilot/playwright-runtime'
 import { LocalCredentialProvider, getOrCreateLocalToken } from '@workcopilot/credential-provider'
 import { gitSnapshotSchema, scanGitRepository } from '@workcopilot/git-analyzer'
-import { fallbackSummary, rawMemoryFromGit } from '@workcopilot/memory-engine'
-import { createLanguageModel, ModelProvider, modelConfigSchema } from '@workcopilot/model-provider'
+import {
+  fallbackSummary,
+  rawMemoryFromGit,
+  buildJournalDisplayMarkdown,
+  gitJournalMaterial,
+  journalNeedsAi,
+  hashGitJournalContent,
+} from '@workcopilot/memory-engine'
+import { createLanguageModel, ModelProvider, modelConfigSchema, normalizeOpenAiCompatibleBaseURL } from '@workcopilot/model-provider'
 import { registerExportTools } from '@workcopilot/feishu-adapter'
 import { NameConflictError, WorkCopilotStore } from './store.js'
 import { parseScanRoots, runJournalGitScan, SCAN_ROOTS_KEY } from './journal-scan.js'
+import {
+  registerAgentSkills,
+  runWorkCopilotAgent,
+  createSkillContext,
+  listSkillNames,
+  classifyChatIntent,
+  CHAT_UNSUPPORTED_REPLY,
+} from '@workcopilot/agent-skills'
 
 export type AppServices = {
   store: WorkCopilotStore
@@ -41,6 +56,43 @@ export async function createServices(store = new WorkCopilotStore()): Promise<Ap
     resolveCredential: (key) => credentials.get(key),
   })
   registerExportTools(registry)
+  registerAgentSkills(registry, {
+    getScanRoots: async () => parseScanRoots((await store.settings())[SCAN_ROOTS_KEY]),
+    listJournals: async (from, to) => store.listJournals(from, to),
+    getJournal: async (date) => store.getJournal(date),
+    listWorkflows: async () => {
+      const rows = await store.listWorkflows()
+      return rows.map((row) => ({ id: row.id, name: row.name, intent: row.intent }))
+    },
+    listMessages: async () => {
+      const rows = await store.listNotifyMessages()
+      return rows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        unread: row.unread,
+        updatedAt: row.updatedAt,
+      }))
+    },
+    generateText: async (prompt, system) => {
+      const config = await store.enabledModelProvider()
+      if (!config) throw new Error('No model is enabled')
+      const apiKey = await credentials.get(config.credentialKey)
+      if (!apiKey) throw new Error('Enabled model credential is missing')
+      const provider = modelConfigSchema.shape.provider.parse(config.providerType)
+      const model = new ModelProvider(createLanguageModel({
+        provider,
+        model: config.model,
+        apiKey,
+        ...(config.baseUrl ? { baseURL: config.baseUrl } : {}),
+      }))
+      const output = await model.generate(prompt, system)
+      const inputChars = prompt.length + (system?.length ?? 0)
+      void store.recordAiUsage({ inputChars, outputChars: output.length }).catch((error) => {
+        console.warn('[ai-usage] record failed', error)
+      })
+      return output
+    },
+  })
   registry.register({
     name: 'credential.get', description: 'Resolve a local credential into the execution context',
     inputSchema: z.object({ key: z.string() }), outputSchema: z.object({ found: z.boolean() }),
@@ -793,11 +845,25 @@ export function createApp(services: AppServices) {
   scheduler.unref?.()
 
   // Daily journal git scan: shortly after boot, then every hour (skips if yesterday already done).
+  const analyzeDiffViaSkill = async (text: string) => {
+    const raw = await services.registry.execute(
+      'skill.report.analyze',
+      { mode: 'diff', text },
+      createSkillContext(),
+    )
+    return z.object({
+      summary: z.string(),
+      bullets: z.array(z.string()),
+      raw: z.string(),
+      markdown: z.string().optional(),
+    }).parse(raw)
+  }
   const runJournalScanSafe = (force = false) => {
     void runJournalGitScan({
       store: services.store,
       credentials: services.credentials,
       force,
+      analyzeDiff: analyzeDiffViaSkill,
     }).then((result) => {
       if (result.projects || result.itemsAdded || result.errors.length) {
         console.log(
@@ -819,6 +885,79 @@ export function createApp(services: AppServices) {
   }))
 
   app.get('/api/projects', async (c) => c.json(await services.store.listProjects()))
+  app.get('/api/projects/:id', async (c) => {
+    const project = await services.store.getProject(c.req.param('id'))
+    if (!project) return c.json({ error: 'Project not found' }, 404)
+    const snapshots = await services.store.listProjectSnapshots(project.id, 30)
+    const lookbackFrom = (() => {
+      const d = new Date()
+      d.setDate(d.getDate() - 60)
+      const y = d.getFullYear()
+      const m = String(d.getMonth() + 1).padStart(2, '0')
+      const day = String(d.getDate()).padStart(2, '0')
+      return `${y}-${m}-${day}`
+    })()
+    const journals = await services.store.listJournals(lookbackFrom)
+    const relatedJournals = journals
+      .filter((journal) => {
+        const nameHit = journal.items.some(
+          (item) => item.source === 'GIT' && item.title === project.name,
+        )
+        const rawHit = journal.rawMarkdown.includes(`## Git · ${project.name}`)
+        return nameHit || rawHit
+      })
+      .map((journal) => ({
+        id: journal.id,
+        date: journal.date,
+        itemCount: journal.items.length,
+        gitItemCount: journal.items.filter((item) => item.source === 'GIT').length,
+        hasAi: Boolean(journal.aiMarkdown?.trim()),
+        aiUpToDate: Boolean(
+          journal.aiMarkdown?.trim()
+          && journal.contentHash
+          && journal.aiContentHash === journal.contentHash,
+        ),
+        contentHash: journal.contentHash,
+        updatedAt: journal.updatedAt,
+      }))
+    return c.json({
+      project: {
+        id: project.id,
+        name: project.name,
+        path: project.path,
+        gitUrl: project.gitUrl,
+        createdAt: project.createdAt,
+      },
+      snapshots: snapshots.map((row) => ({
+        id: row.id,
+        commitHash: row.commitHash,
+        summary: row.summary,
+        createdAt: row.createdAt,
+      })),
+      journals: relatedJournals,
+    })
+  })
+  app.get('/api/recordings', async (c) => {
+    const rows = await services.store.listRecordings()
+    return c.json(rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      intent: row.intent,
+      url: row.url,
+      status: row.status,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    })))
+  })
+  app.get('/api/recordings/:id', async (c) => {
+    const row = await services.store.getRecording(c.req.param('id'))
+    if (!row) return c.json({ error: 'Recording not found' }, 404)
+    return c.json(row)
+  })
+  app.get('/api/usage', async (c) => {
+    const days = Math.max(1, Math.min(31, Number(c.req.query('days') || 7) || 7))
+    return c.json({ days: await services.store.listAiUsage(days) })
+  })
   app.post('/api/projects', async (c) => {
     const input = z.object({ name: z.string().min(1), path: z.string().min(1), gitUrl: z.string().url().optional() }).parse(await c.req.json())
     return c.json(await services.store.createProject({
@@ -848,10 +987,108 @@ export function createApp(services: AppServices) {
   app.get('/api/journals', async (c) => {
     return c.json(await services.store.listJournals(c.req.query('from'), c.req.query('to')))
   })
+  app.post('/api/journals/summarize', async (c) => {
+    const input = z.object({
+      from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      kind: z.enum(['monthly', 'weekly', 'range']).default('monthly'),
+    }).parse(await c.req.json())
+    const rows = await services.store.listJournals(input.from, input.to)
+    if (!rows.length) {
+      const emptyMsg = input.kind === 'monthly'
+        ? '本月暂无日报可总结'
+        : input.kind === 'weekly'
+          ? '本周暂无日报可总结'
+          : '该区间暂无日报可总结'
+      return c.json({
+        summary: emptyMsg,
+        bullets: [] as string[],
+        raw: '',
+        skipped: true,
+        reason: 'empty',
+      })
+    }
+    const label = input.kind === 'monthly' ? '月报' : input.kind === 'weekly' ? '周报' : '区间总结'
+    const raw = await services.registry.execute(
+      'skill.report.analyze',
+      {
+        mode: 'journal',
+        from: input.from,
+        to: input.to,
+      },
+      createSkillContext(),
+    )
+    const parsed = z.object({
+      summary: z.string(),
+      bullets: z.array(z.string()),
+      raw: z.string(),
+      markdown: z.string().optional(),
+    }).parse(raw)
+    return c.json({ ...parsed, kind: input.kind, label, skipped: false })
+  })
   app.get('/api/journals/:date', async (c) => {
     const journal = await services.store.getJournal(c.req.param('date'))
     if (!journal) return c.json({ error: 'Journal not found' }, 404)
     return c.json(journal)
+  })
+  app.post('/api/journals/:date/analyze', async (c) => {
+    const date = c.req.param('date')
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: 'Invalid date' }, 400)
+    let journal = await services.store.getJournal(date)
+    if (!journal) return c.json({ error: 'Journal not found' }, 404)
+
+    // Keep contentHash current before deciding.
+    journal = await services.store.refreshJournalContentHash(date)
+    const material = gitJournalMaterial(journal)
+    if (!material) {
+      return c.json({
+        skipped: true,
+        reason: 'no_git',
+        cached: false,
+        markdown: buildJournalDisplayMarkdown(journal),
+        journal,
+      })
+    }
+
+    if (!journalNeedsAi(journal)) {
+      return c.json({
+        skipped: true,
+        reason: 'cached',
+        cached: true,
+        markdown: buildJournalDisplayMarkdown(journal),
+        journal,
+      })
+    }
+
+    const text = `## ${date}\n\n${material}`
+    const raw = await services.registry.execute(
+      'skill.report.analyze',
+      { mode: 'daily', text },
+      createSkillContext(),
+    )
+    const parsed = z.object({
+      summary: z.string(),
+      bullets: z.array(z.string()),
+      raw: z.string(),
+      markdown: z.string(),
+    }).parse(raw)
+    const contentHash = journal.contentHash || hashGitJournalContent(journal)
+    const markdown = (parsed.markdown || parsed.raw || '').trim()
+    if (!markdown) {
+      return c.json({ error: 'AI returned empty markdown' }, 502)
+    }
+    journal = await services.store.saveJournalAiMarkdown({
+      date,
+      aiMarkdown: markdown,
+      contentHash,
+    })
+    return c.json({
+      skipped: false,
+      reason: null,
+      cached: false,
+      markdown: buildJournalDisplayMarkdown(journal),
+      journal,
+    })
   })
   app.post('/api/journals/:date/items', async (c) => {
     const date = c.req.param('date')
@@ -893,6 +1130,7 @@ export function createApp(services: AppServices) {
       ...(body.endDate ? { endDate: body.endDate } : {}),
       lookbackDays: body.lookbackDays ?? (body.date ? 1 : 7),
       force: body.force ?? true,
+      analyzeDiff: analyzeDiffViaSkill,
     })
     return c.json(result)
   })
@@ -922,19 +1160,31 @@ export function createApp(services: AppServices) {
     apiKey: z.string().min(1),
     enabled: z.boolean().default(true),
   })
-  app.get('/api/models', async (c) => c.json(await services.store.listModelProviders()))
+  app.get('/api/models', async (c) => {
+    const pruned = await services.store.pruneModelProviders((url) =>
+      normalizeOpenAiCompatibleBaseURL(url ?? undefined),
+    )
+    for (const key of pruned.removedCredentialKeys) {
+      await services.credentials.remove(key).catch(() => undefined)
+    }
+    return c.json(pruned.providers)
+  })
   app.post('/api/models', async (c) => {
     const input = modelInputSchema.parse(await c.req.json())
     const credentialKey = `model.${randomUUID()}`
     await services.credentials.save(credentialKey, input.apiKey)
-    const provider = await services.store.createModelProvider({
+    const baseURL = normalizeOpenAiCompatibleBaseURL(input.baseURL)
+    const { provider, removedCredentialKeys } = await services.store.replaceModelProvider({
       name: input.name,
       providerType: input.provider,
       credentialKey,
       model: input.model,
       enabled: input.enabled,
-      ...(input.baseURL ? { baseUrl: input.baseURL } : {}),
+      ...(baseURL ? { baseUrl: baseURL } : {}),
     })
+    for (const key of removedCredentialKeys) {
+      await services.credentials.remove(key).catch(() => undefined)
+    }
     return c.json(provider, 201)
   })
   const configuredModel = async () => {
@@ -953,28 +1203,97 @@ export function createApp(services: AppServices) {
   app.post('/api/models/test', async (c) => {
     const model = await configuredModel()
     if (!model) return c.json({ error: 'No model is enabled' }, 404)
-    return c.json({ response: await model.generate('Reply with exactly: OK') })
+    const prompt = 'Reply with exactly: OK'
+    const response = await model.generate(prompt)
+    void services.store.recordAiUsage({
+      inputChars: prompt.length,
+      outputChars: response.length,
+    }).catch((error) => console.warn('[ai-usage] record failed', error))
+    return c.json({ response })
   })
 
   app.post('/api/chat', async (c) => {
     const { message } = z.object({ message: z.string().min(1) }).parse(await c.req.json())
-    const normalized = message.toLowerCase()
-    if (normalized.includes('总结') || normalized.includes('summary')) {
-      const today = new Date().toISOString().slice(0, 10)
-      const records = await services.store.listMemories(today, today)
-      return c.json({ message: fallbackSummary(records, 'Today Work Summary'), tool: 'memory.query' })
-    }
-    const model = await configuredModel()
-    if (model) {
+    const intent = classifyChatIntent(message)
+    if (intent.kind === 'unsupported') {
       return c.json({
-        message: await model.generate(
-          message,
-          'You are WorkCopilot. Never emit executable scripts. Propose only validated Workflow DSL and registered tools.',
-        ),
+        message: CHAT_UNSUPPORTED_REPLY,
+        intent: intent.kind,
+        skillCalls: [],
+        skills: listSkillNames(services.registry),
       })
     }
-    return c.json({ message: 'I can execute workflows, scan Git projects, and summarize work memories.', tools: services.registry.list() })
+    if (intent.kind === 'navigate') {
+      return c.json({
+        message: `该操作需要打开插件的「${intent.target}」页面，请在聊天里确认跳转。`,
+        intent: intent.kind,
+        navigateTarget: intent.target,
+        skillCalls: [],
+        skills: listSkillNames(services.registry),
+      })
+    }
+    const model = await configuredModel()
+    if (!model) {
+      return c.json({
+        message: '未配置模型。请在扩展设置中填写 API 地址 / 模型名 / SK。',
+        skills: listSkillNames(services.registry),
+        tools: services.registry.list(),
+      })
+    }
+    const result = await runWorkCopilotAgent({
+      model: model.languageModel,
+      registry: services.registry,
+      prompt: message,
+      maxSteps: 8,
+    })
+    void services.store.recordAiUsage({
+      inputChars: message.length,
+      outputChars: (result.text || '').length,
+    }).catch((error) => console.warn('[ai-usage] record failed', error))
+    return c.json({
+      message: result.text,
+      steps: result.steps,
+      skillCalls: result.skillCalls,
+      skills: result.skillNames,
+      intent: 'chat',
+    })
   })
+  app.post('/api/agent', async (c) => {
+    const { message } = z.object({ message: z.string().min(1) }).parse(await c.req.json())
+    const intent = classifyChatIntent(message)
+    if (intent.kind === 'unsupported') {
+      return c.json({
+        message: CHAT_UNSUPPORTED_REPLY,
+        intent: intent.kind,
+        skillCalls: [],
+        skills: listSkillNames(services.registry),
+      })
+    }
+    const model = await configuredModel()
+    if (!model) return c.json({ error: 'No model is enabled', skills: listSkillNames(services.registry) }, 404)
+    const result = await runWorkCopilotAgent({
+      model: model.languageModel,
+      registry: services.registry,
+      prompt: message,
+      maxSteps: 8,
+    })
+    void services.store.recordAiUsage({
+      inputChars: message.length,
+      outputChars: (result.text || '').length,
+    }).catch((error) => console.warn('[ai-usage] record failed', error))
+    return c.json({
+      message: result.text,
+      steps: result.steps,
+      skillCalls: result.skillCalls,
+      skills: result.skillNames,
+    })
+  })
+  app.get('/api/skills', async (c) => c.json({
+    skills: listSkillNames(services.registry).map((name) => {
+      const tool = services.registry.get(name)
+      return { name, description: tool?.description ?? '' }
+    }),
+  }))
   app.post('/api/chat/stream', async (c) => {
     const { message } = z.object({ message: z.string().min(1) }).parse(await c.req.json())
     const model = await configuredModel()

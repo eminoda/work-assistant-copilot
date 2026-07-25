@@ -438,10 +438,15 @@ export class PlaywrightRuntime {
   }
 
   /**
-   * Wait until document + network settle so SPA bootstrap / Set-Cookie can finish
+   * Wait until document (+ optional network) settle so SPA bootstrap / Set-Cookie can finish
    * before the next workflow step. networkidle is best-effort (timeout does not fail).
    */
-  async waitForPageReady(page: Page, label: string): Promise<void> {
+  async waitForPageReady(
+    page: Page,
+    label: string,
+    options: { networkIdle?: boolean } = {},
+  ): Promise<void> {
+    const wantNetworkIdle = options.networkIdle !== false
     try {
       await page.waitForLoadState('domcontentloaded', { timeout: 15_000 })
     } catch {
@@ -452,6 +457,7 @@ export class PlaywrightRuntime {
     } catch {
       console.warn(`[playwright:ready] ${label} load timeout url=${page.url()}`)
     }
+    if (!wantNetworkIdle) return
     try {
       // SPA often keeps a few long-lived requests; cap wait so we don't hang forever.
       await page.waitForLoadState('networkidle', { timeout: 8_000 })
@@ -617,11 +623,15 @@ export function registerBrowserTools(
       await locator.waitFor({ state: 'visible', timeout: 15_000 })
       const beforeUrl = page.url()
       const pagesBefore = new Set(page.context().pages())
+      // Start listening before click, but do not block the full 15s when no popup opens.
       const popupPromise = page.waitForEvent('popup', { timeout: 15_000 }).catch(() => null)
 
       await locator.click({ timeout: 15_000 })
 
-      const popup = await popupPromise
+      const popup = await Promise.race([
+        popupPromise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 2_000)),
+      ])
       let active = page
       if (popup && !popup.isClosed()) {
         const popupDeadline = Date.now() + 15_000
@@ -631,13 +641,15 @@ export function registerBrowserTools(
         if (!popup.isClosed() && /^https?:/i.test(popup.url())) {
           active = await runtime.adoptPage(popup, 'popup after click')
         } else {
-          active = await runtime.settleAfterClick(page, beforeUrl, pagesBefore, 10_000)
+          active = await runtime.settleAfterClick(page, beforeUrl, pagesBefore, 4_000)
         }
       } else {
-        active = await runtime.settleAfterClick(page, beforeUrl, pagesBefore, 15_000)
+        // New tabs are still picked up here; keep this short when the click stays on-page (e.g. focus input).
+        active = await runtime.settleAfterClick(page, beforeUrl, pagesBefore, 4_000)
       }
 
-      await runtime.waitForPageReady(active, 'after browser.click')
+      const navigated = !active.isClosed() && active.url() !== beforeUrl
+      await runtime.waitForPageReady(active, 'after browser.click', { networkIdle: navigated })
       await runtime.logCookies('after browser.click', active)
       console.log(`[playwright:click] settled url=${active.url()} (before=${beforeUrl})`)
 

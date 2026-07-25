@@ -228,6 +228,34 @@ export function useRuntime() {
     }) as Promise<import('../journalTypes').DailyJournal>
   }
 
+  async function analyzeJournalDay(date: string) {
+    return request(`/api/journals/${encodeURIComponent(date)}/analyze`, {
+      method: 'POST',
+      body: '{}',
+    }) as Promise<{
+      skipped: boolean
+      reason?: string | null
+      cached?: boolean
+      markdown: string
+      journal: import('../journalTypes').DailyJournal
+    }>
+  }
+
+  async function summarizeJournals(from: string, to: string, kind: 'monthly' | 'weekly' | 'range' = 'monthly') {
+    return request('/api/journals/summarize', {
+      method: 'POST',
+      body: JSON.stringify({ from, to, kind }),
+    }) as Promise<{
+      skipped: boolean
+      reason?: string
+      summary: string
+      bullets: string[]
+      raw: string
+      kind?: string
+      label?: string
+    }>
+  }
+
   async function getSettings() {
     return request('/api/settings') as Promise<Record<string, string>>
   }
@@ -278,6 +306,20 @@ export function useRuntime() {
     })
   }
 
+  async function chat(message: string) {
+    return request('/api/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    }) as Promise<{
+      message: string
+      intent?: string
+      navigateTarget?: string
+      skillCalls?: Array<{ name: string; args?: unknown }>
+      skills?: string[]
+      steps?: unknown
+    }>
+  }
+
   return {
     token,
     workflows: readonly(workflows),
@@ -304,10 +346,13 @@ export function useRuntime() {
     listJournals,
     getJournal,
     addJournalItem,
+    analyzeJournalDay,
+    summarizeJournals,
     getSettings,
     setScanRoots,
     listModels,
     saveModel,
     triggerJournalScan,
+    chat,
   }
 }

@@ -3,7 +3,6 @@ import {
   discoverGitRepos,
   filesForCommits,
   projectNameFromPath,
-  summarizeCommitFilesForAi,
 } from '@workcopilot/git-analyzer'
 import { localToday, localYesterday } from '@workcopilot/memory-engine'
 import { createLanguageModel, ModelProvider, modelConfigSchema } from '@workcopilot/model-provider'
@@ -43,16 +42,6 @@ async function resolveModel(
   }))
 }
 
-function parseAiBullets(text: string): string[] {
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-  const bullets = lines
-    .map((line) => line.replace(/^[-*•]\s+/, '').replace(/^\d+[.)]\s+/, '').trim())
-    .filter((line) => line.length > 1 && line.length < 280)
-  if (bullets.length) return [...new Set(bullets)].slice(0, 12)
-  const compact = text.replace(/\s+/g, ' ').trim()
-  return compact ? [compact.slice(0, 280)] : []
-}
-
 function formatYmd(date: Date): string {
   const y = date.getFullYear()
   const m = String(date.getMonth() + 1).padStart(2, '0')
@@ -82,9 +71,12 @@ export type JournalScanResult = {
   errors: string[]
 }
 
+/**
+ * Ingest git facts only. AI analysis is deferred until the user opens the day
+ * (hash mismatch / missing aiMarkdown).
+ */
 async function ingestProjectDay(input: {
   store: WorkCopilotStore
-  model: ModelProvider | undefined
   root: string
   name: string
   projectId: string
@@ -135,41 +127,6 @@ async function ingestProjectDay(input: {
     }),
   ].filter(Boolean).join('\n')
 
-  if (input.model) {
-    try {
-      const prompt = summarizeCommitFilesForAi(input.name, input.root, commits)
-      console.log(`[journal-scan] AI summarize project=${input.name} date=${input.date} promptChars=${prompt.length}`)
-      const aiText = await input.model.generate(
-        `${prompt}\n\n请根据上面的文件列表与 git diff，用中文总结该日在该项目中完成的功能/改动，输出 3-8 条短句，每行一条，不要开场白。`,
-        '你是研发周报助手。依据 diff 判断真实改动，只输出条目列表。',
-      )
-      const bullets = parseAiBullets(aiText)
-      await input.store.addJournalItem({
-        date: input.date,
-        title: input.name,
-        description: bullets[0] ?? `${hashes.length} 次提交`,
-        source: 'GIT',
-        rawSection: `${factMd}\n\n### AI 总结\n\n${aiText.trim()}`,
-      })
-      input.result.itemsAdded += 1
-      for (const extra of bullets.slice(1)) {
-        await input.store.addJournalItem({
-          date: input.date,
-          title: input.name,
-          description: extra,
-          source: 'GIT',
-        })
-        input.result.itemsAdded += 1
-      }
-      return
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      input.result.errors.push(`${input.name}@${input.date}: AI ${message}`)
-    }
-  } else {
-    console.warn(`[journal-scan] no enabled model — skip AI for ${input.name}@${input.date}`)
-  }
-
   await input.store.addJournalItem({
     date: input.date,
     title: input.name,
@@ -193,6 +150,8 @@ export async function runJournalGitScan(input: {
   /** End of lookback window. Default: yesterday for lookback=1, today when lookback>1. */
   endDate?: string
   force?: boolean
+  /** @deprecated AI is no longer run during scan; kept for call-site compatibility. */
+  analyzeDiff?: (text: string) => Promise<{ summary: string; bullets: string[]; raw: string }>
 }): Promise<JournalScanResult> {
   const lookbackDays = Math.max(1, input.lookbackDays ?? 1)
   const endDate = input.endDate
@@ -231,12 +190,14 @@ export async function runJournalGitScan(input: {
 
   const repos = await discoverGitRepos(roots)
   result.projects = repos.length
-  const model = await resolveModel(input.store, input.credentials)
+  // Model still resolved so settings/health paths stay consistent; scan itself does not call AI.
+  await resolveModel(input.store, input.credentials)
 
   console.log(
-    `[journal-scan] roots=${roots.length} repos=${repos.length} dates=${dates.join(',')} model=${model ? 'yes' : 'no'}`,
+    `[journal-scan] roots=${roots.length} repos=${repos.length} dates=${dates.join(',')} (AI deferred to day view)`,
   )
 
+  const touched = new Set<string>()
   for (const root of repos) {
     const name = projectNameFromPath(root)
     try {
@@ -244,17 +205,26 @@ export async function runJournalGitScan(input: {
       for (const day of dates) {
         await ingestProjectDay({
           store: input.store,
-          model,
           root,
           name,
           projectId: project.id,
           date: day,
           result,
         })
+        touched.add(day)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       result.errors.push(`${name}: ${message}`)
+    }
+  }
+
+  for (const day of touched) {
+    try {
+      await input.store.refreshJournalContentHash(day)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      result.errors.push(`hash@${day}: ${message}`)
     }
   }
 

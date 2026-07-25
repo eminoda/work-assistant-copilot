@@ -12,6 +12,9 @@ export const dailyJournalSchema = z.object({
   date: z.string(),
   items: z.array(journalItemSchema),
   rawMarkdown: z.string(),
+  contentHash: z.string().default(''),
+  aiMarkdown: z.string().default(''),
+  aiContentHash: z.string().default(''),
   createdAt: z.string(),
   updatedAt: z.string(),
 })

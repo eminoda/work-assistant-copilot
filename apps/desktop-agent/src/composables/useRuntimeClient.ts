@@ -2,6 +2,63 @@ import { readonly, shallowRef } from 'vue'
 
 const baseUrl = 'http://127.0.0.1:4317'
 
+export type UsageDay = {
+  date: string
+  callCount: number
+  inputChars: number
+  outputChars: number
+}
+
+export type ProjectRow = {
+  id: string
+  name: string
+  path: string
+  gitUrl: string | null
+  createdAt: string
+}
+
+export type ProjectDetail = {
+  project: ProjectRow
+  snapshots: Array<{
+    id: string
+    commitHash: string
+    summary: string | null
+    createdAt: string
+  }>
+  journals: Array<{
+    id: string
+    date: string
+    itemCount: number
+    gitItemCount: number
+    hasAi: boolean
+    aiUpToDate: boolean
+    contentHash: string
+    updatedAt: string
+  }>
+}
+
+export type WorkflowSummary = {
+  id: string
+  name: string
+  intent: string
+  kind?: string
+  homeUrl?: string
+  steps?: Array<{ id: string; tool: string; params: Record<string, unknown> }>
+  prerequisiteWorkflowId?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+export type RecordingRow = {
+  id: string
+  name: string
+  intent: string
+  url: string | null
+  status: string
+  createdAt: string
+  updatedAt: string
+}
+
 export function useRuntimeClient() {
   const token = shallowRef(localStorage.getItem('workcopilot.token') ?? '')
   const connected = shallowRef(false)
@@ -18,7 +75,17 @@ export function useRuntimeClient() {
           ...options.headers,
         },
       })
-      if (!response.ok) throw new Error(await response.text())
+      if (!response.ok) {
+        const text = await response.text()
+        let message = text || response.statusText
+        try {
+          const body = JSON.parse(text) as { error?: string }
+          if (body?.error) message = body.error
+        } catch {
+          // keep text
+        }
+        throw new Error(message)
+      }
       return response.status === 204 ? (undefined as T) : response.json()
     } finally {
       loading.value = false
@@ -49,7 +116,6 @@ export function useRuntimeClient() {
     connected.value = true
   }
 
-  /** On launch: if a token is saved, connect (retry while runtime is still booting). */
   async function autoConnect(retries = 12, delayMs = 500) {
     const saved = token.value.trim()
     if (!saved) return
@@ -70,6 +136,84 @@ export function useRuntimeClient() {
     console.warn('[desktop] auto-connect failed', lastError)
   }
 
+  async function getSettings() {
+    return request<Record<string, string>>('/api/settings')
+  }
+
+  async function setScanRoots(roots: string[]) {
+    return request('/api/settings/scan.roots', {
+      method: 'PUT',
+      body: JSON.stringify({ roots }),
+    })
+  }
+
+  async function listModels() {
+    return request<Array<{
+      id: string
+      name: string
+      providerType: string
+      baseUrl: string | null
+      model: string
+      enabled: boolean
+    }>>('/api/models')
+  }
+
+  async function saveModel(input: {
+    name: string
+    provider: string
+    model: string
+    baseURL?: string
+    apiKey: string
+    enabled?: boolean
+  }) {
+    return request('/api/models', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: input.name,
+        provider: input.provider,
+        model: input.model,
+        apiKey: input.apiKey,
+        enabled: input.enabled ?? true,
+        ...(input.baseURL ? { baseURL: input.baseURL } : {}),
+      }),
+    })
+  }
+
+  async function triggerJournalScan(force = true, lookbackDays = 7) {
+    return request('/api/projects/discover-scan', {
+      method: 'POST',
+      body: JSON.stringify({ force, lookbackDays }),
+    })
+  }
+
+  async function listUsage(days = 7) {
+    return request<{ days: UsageDay[] }>(`/api/usage?days=${days}`)
+  }
+
+  async function listProjects() {
+    return request<ProjectRow[]>('/api/projects')
+  }
+
+  async function getProject(id: string) {
+    return request<ProjectDetail>(`/api/projects/${encodeURIComponent(id)}`)
+  }
+
+  async function listWorkflows() {
+    return request<WorkflowSummary[]>('/api/workflows')
+  }
+
+  async function getWorkflow(id: string) {
+    return request<WorkflowSummary>(`/api/workflows/${encodeURIComponent(id)}`)
+  }
+
+  async function listRecordings() {
+    return request<RecordingRow[]>('/api/recordings')
+  }
+
+  async function getRecording(id: string) {
+    return request<RecordingRow & { events?: unknown }>(`/api/recordings/${encodeURIComponent(id)}`)
+  }
+
   return {
     token: readonly(token),
     connected: readonly(connected),
@@ -77,5 +221,17 @@ export function useRuntimeClient() {
     request,
     connect,
     autoConnect,
+    getSettings,
+    setScanRoots,
+    listModels,
+    saveModel,
+    triggerJournalScan,
+    listUsage,
+    listProjects,
+    getProject,
+    listWorkflows,
+    getWorkflow,
+    listRecordings,
+    getRecording,
   }
 }

@@ -1,12 +1,24 @@
 <script setup lang="ts">
-import { computed, onMounted, shallowRef } from 'vue'
-import { formatMmDd } from '@workcopilot/memory-engine'
+import { computed, onMounted, shallowRef, watch } from 'vue'
+import { marked } from 'marked'
+import {
+  buildJournalDisplayMarkdown,
+  formatMmDd,
+  journalNeedsAi,
+} from '@workcopilot/memory-engine'
 import type { DailyJournal } from '../journalTypes'
 
 const props = defineProps<{
   date: string
   getJournal: (date: string) => Promise<DailyJournal>
   addItem: (date: string, title: string, description: string) => Promise<DailyJournal>
+  analyzeDay: (date: string) => Promise<{
+    skipped: boolean
+    reason?: string | null
+    cached?: boolean
+    markdown: string
+    journal: DailyJournal
+  }>
 }>()
 
 const emit = defineEmits<{
@@ -21,31 +33,68 @@ const title = shallowRef('')
 const description = shallowRef('')
 const saving = shallowRef(false)
 const showForm = shallowRef(false)
+const aiBusy = shallowRef(false)
+const aiError = shallowRef('')
 
 const heading = computed(() => formatMmDd(props.date))
+
+const displayMarkdown = computed(() => {
+  if (!journal.value) return ''
+  return buildJournalDisplayMarkdown(journal.value)
+})
+
+const displayHtml = computed(() => {
+  const md = displayMarkdown.value
+  if (!md.trim()) return ''
+  return marked.parse(md, { async: false }) as string
+})
+
+function emptyJournal(date: string): DailyJournal {
+  return {
+    id: '',
+    date,
+    items: [],
+    rawMarkdown: '',
+    contentHash: '',
+    aiMarkdown: '',
+    aiContentHash: '',
+    createdAt: '',
+    updatedAt: '',
+  }
+}
+
+async function ensureAiIfNeeded() {
+  if (!journal.value || !journalNeedsAi(journal.value)) return
+  aiBusy.value = true
+  aiError.value = ''
+  try {
+    const result = await props.analyzeDay(props.date)
+    journal.value = result.journal
+  } catch (err) {
+    aiError.value = err instanceof Error ? err.message : 'AI 分析失败'
+  } finally {
+    aiBusy.value = false
+  }
+}
 
 async function reload() {
   loading.value = true
   error.value = ''
+  aiError.value = ''
   try {
     journal.value = await props.getJournal(props.date)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     if (/not found/i.test(message)) {
-      journal.value = {
-        id: '',
-        date: props.date,
-        items: [],
-        rawMarkdown: '',
-        createdAt: '',
-        updatedAt: '',
-      }
+      journal.value = emptyJournal(props.date)
     } else {
       error.value = message
+      journal.value = null
     }
   } finally {
     loading.value = false
   }
+  await ensureAiIfNeeded()
 }
 
 async function onAdd() {
@@ -63,6 +112,10 @@ async function onAdd() {
   }
 }
 
+watch(() => props.date, () => {
+  void reload()
+})
+
 onMounted(() => {
   void reload()
 })
@@ -76,7 +129,7 @@ onMounted(() => {
           <path fill="currentColor" d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z" />
         </svg>
       </button>
-      <strong>{{ heading }}</strong>
+      <strong>{{ heading }} · 日报</strong>
       <button class="text-btn" type="button" @click="emit('openRaw')">查看原数据</button>
     </div>
 
@@ -84,17 +137,11 @@ onMounted(() => {
     <p v-else-if="loading" class="hint">加载中…</p>
 
     <article v-else class="daily-body">
-      <template v-if="journal?.items.length">
-        <section v-for="item in journal.items" :key="item.id" class="daily-item">
-          <h1>{{ item.title }}</h1>
-          <ul>
-            <li v-for="(bullet, index) in item.bullets" :key="`${item.id}-${index}`">
-              {{ bullet }}
-            </li>
-          </ul>
-        </section>
-      </template>
-      <p v-else class="hint">暂无事项，可手动新增或等待 Git 扫描。</p>
+      <p v-if="aiBusy" class="hint">检测到 Git 变更，正在生成 AI 日报…</p>
+      <p v-else-if="aiError" class="error">{{ aiError }}</p>
+
+      <div v-if="displayHtml" class="md-body daily-md" v-html="displayHtml" />
+      <p v-else-if="!aiBusy" class="hint">暂无内容，可手动新增或等待 Git 扫描。</p>
 
       <div class="daily-actions">
         <button class="secondary" type="button" @click="showForm = !showForm">

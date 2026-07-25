@@ -2,7 +2,7 @@
 import { computed, shallowRef } from 'vue'
 import { canLinkPrerequisite, workflowExitUrl } from '../workflowLink'
 import ConfirmDialog from './ConfirmDialog.vue'
-import { formatWorkflowTime, type WorkflowSummary } from '../workflowTypes'
+import type { WorkflowSummary } from '../workflowTypes'
 
 const props = defineProps<{
   workflows: WorkflowSummary[]
@@ -29,11 +29,6 @@ const renameError = shallowRef('')
 function kindLabel(kind?: string, intent?: string) {
   if (kind === 'login' || intent?.includes('login')) return '登录'
   return '应用'
-}
-
-function timeLabel(workflow: { createdAt?: string; updatedAt?: string }) {
-  const stamp = formatWorkflowTime(workflow.updatedAt || workflow.createdAt)
-  return stamp ? `更新于 ${stamp}` : ''
 }
 
 function isRunning(id: string) {
@@ -171,13 +166,16 @@ function candidateHint(workflow: WorkflowSummary) {
         <div class="workflow-meta">
           <div class="workflow-title">
             <b>{{ workflow.name }}</b>
-            <span class="kind-badge">{{ kindLabel(workflow.kind, workflow.intent) }}</span>
+            <span
+              class="kind-badge"
+              :data-kind="kindLabel(workflow.kind, workflow.intent) === '登录' ? 'login' : 'app'"
+            >{{ kindLabel(workflow.kind, workflow.intent) }}</span>
+            <span
+              v-if="workflow.prerequisiteWorkflowId"
+              class="kind-badge prereq-badge"
+              :title="`前置：${prerequisiteName(workflow.prerequisiteWorkflowId)}`"
+            >前置 · {{ prerequisiteName(workflow.prerequisiteWorkflowId) }}</span>
           </div>
-          <small v-if="workflow.prerequisiteWorkflowId" class="workflow-prereq">
-            前置：{{ prerequisiteName(workflow.prerequisiteWorkflowId) }}
-          </small>
-          <small v-if="timeLabel(workflow)" class="workflow-time">{{ timeLabel(workflow) }}</small>
-          <small>{{ workflow.homeUrl || workflow.intent }}</small>
         </div>
         <div class="actions" @click.stop>
           <button

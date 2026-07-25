@@ -7,7 +7,7 @@ import ActionDock from './components/ActionDock.vue'
 import WorkflowList from './components/WorkflowList.vue'
 import RenameWorkflowPrompt from './components/RenameWorkflowPrompt.vue'
 import SettingsView from './components/SettingsView.vue'
-import ComingSoonView from './components/ComingSoonView.vue'
+import ChatView from './components/ChatView.vue'
 import RecordingView from './components/RecordingView.vue'
 import WorkflowDetailView from './components/WorkflowDetailView.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
@@ -19,6 +19,7 @@ import DailyReportRawView from './components/DailyReportRawView.vue'
 import { useRuntime } from './composables/useRuntime'
 import type { RecorderState } from './types'
 import type { WorkflowSummary } from './workflowTypes'
+import type { ChatNavigateTarget } from './chatIntent'
 
 const view = shallowRef<'home' | 'settings' | 'notify' | 'chat' | 'record' | 'detail' | 'report' | 'report-day' | 'report-raw'>('home')
 const reportDate = shallowRef('')
@@ -479,6 +480,22 @@ async function openNotify() {
   await refreshNotifyCenter()
 }
 
+function openChat() {
+  view.value = 'chat'
+}
+
+function navigateFromChat(target: ChatNavigateTarget) {
+  if (target === 'record') {
+    void openRecording()
+    return
+  }
+  if (target === 'notify') {
+    void openNotify()
+    return
+  }
+  openReport()
+}
+
 async function markNotifyRead(id: string) {
   await runtime.markMessageRead(id)
   await refreshNotifyCenter()
@@ -567,6 +584,7 @@ onUnmounted(() => {
     <WeeklyReportView
       v-else-if="view === 'report'"
       :list-journals="runtime.listJournals"
+      :summarize-journals="runtime.summarizeJournals"
       @back="leaveSecondary"
       @open-day="openReportDay"
     />
@@ -576,6 +594,7 @@ onUnmounted(() => {
       :date="reportDate"
       :get-journal="runtime.getJournal"
       :add-item="runtime.addJournalItem"
+      :analyze-day="runtime.analyzeJournalDay"
       @back="view = 'report'"
       @open-raw="openReportRaw"
     />
@@ -604,12 +623,13 @@ onUnmounted(() => {
       @run-workflow="execute"
     />
 
-    <ComingSoonView
+    <ChatView
       v-else-if="view === 'chat'"
-      title="AI 聊天"
-      description="与本地 AI Runtime 对话即将上线，敬请期待。"
+      :chat="runtime.chat"
+      :connected="connected"
       @back="leaveSecondary"
       @close="leaveSecondary"
+      @navigate="navigateFromChat"
     />
 
     <template v-else-if="view === 'detail'">
@@ -672,7 +692,7 @@ onUnmounted(() => {
         @record="openRecording"
         @notify="openNotify"
         @report="openReport"
-        @chat="view = 'chat'"
+        @chat="openChat"
       />
       <WorkflowList
         :workflows="([...runtime.workflows.value] as WorkflowSummary[])"

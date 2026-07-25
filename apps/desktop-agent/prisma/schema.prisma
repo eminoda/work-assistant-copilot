@@ -99,11 +99,23 @@ model DailyMemory {
 }
 
 model DailyJournal {
+  id            String   @id @default(cuid())
+  date          String   @unique
+  items         Json
+  rawMarkdown   String   @default("")
+  contentHash   String   @default("")
+  aiMarkdown    String   @default("")
+  aiContentHash String   @default("")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model AiUsageDaily {
   id          String   @id @default(cuid())
   date        String   @unique
-  items       Json
-  rawMarkdown String   @default("")
-  createdAt   DateTime @default(now())
+  callCount   Int      @default(0)
+  inputChars  Int      @default(0)
+  outputChars Int      @default(0)
   updatedAt   DateTime @updatedAt
 }
 

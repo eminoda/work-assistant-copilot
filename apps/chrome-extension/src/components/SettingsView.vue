@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { onMounted, shallowRef } from 'vue'
 
+const DEFAULT_MODEL_BASE_URL = 'https://api.deepseek.com'
+const DEFAULT_MODEL_NAME = 'deepseek-v4-flash'
+
 const props = defineProps<{
   status: string
   initialToken: string
@@ -36,12 +39,12 @@ const rootsText = shallowRef('')
 const rootsBusy = shallowRef(false)
 const rootsMsg = shallowRef('')
 
-const modelBaseUrl = shallowRef('https://api.openai.com/v1')
-const modelName = shallowRef('gpt-4o-mini')
+const modelBaseUrl = shallowRef(DEFAULT_MODEL_BASE_URL)
+const modelName = shallowRef(DEFAULT_MODEL_NAME)
 const modelKey = shallowRef('')
 const modelBusy = shallowRef(false)
 const modelMsg = shallowRef('')
-const models = shallowRef<Array<{ id: string; name: string; model: string; enabled: boolean; baseUrl: string | null }>>([])
+const modelEnabledHint = shallowRef('')
 
 const scanBusy = shallowRef(false)
 const scanMsg = shallowRef('')
@@ -69,12 +72,15 @@ async function loadExtras() {
     } catch {
       rootsText.value = raw
     }
-    models.value = await props.listModels()
-    const enabled = models.value.find((item) => item.enabled)
-    if (enabled) {
-      modelName.value = enabled.model
-      if (enabled.baseUrl) modelBaseUrl.value = enabled.baseUrl
-    }
+    // Always keep form defaults; listModels also prunes historical rows server-side.
+    modelBaseUrl.value = DEFAULT_MODEL_BASE_URL
+    modelName.value = DEFAULT_MODEL_NAME
+    modelKey.value = ''
+    const models = await props.listModels()
+    const enabled = models.find((item) => item.enabled) ?? models[0]
+    modelEnabledHint.value = enabled
+      ? `当前启用：${enabled.model}${enabled.baseUrl ? ` · ${enabled.baseUrl}` : ''}`
+      : ''
   } catch {
     // token may be missing
   }
@@ -102,17 +108,25 @@ async function saveModelConfig() {
   modelBusy.value = true
   modelMsg.value = ''
   try {
+    const baseURL = modelBaseUrl.value.trim() || DEFAULT_MODEL_BASE_URL
+    const model = modelName.value.trim() || DEFAULT_MODEL_NAME
     await props.saveModel({
       name: 'default',
       provider: 'openai-compatible',
-      model: modelName.value.trim(),
+      model,
       apiKey: modelKey.value.trim(),
       enabled: true,
-      ...(modelBaseUrl.value.trim() ? { baseURL: modelBaseUrl.value.trim() } : {}),
+      baseURL,
     })
+    modelBaseUrl.value = DEFAULT_MODEL_BASE_URL
+    modelName.value = DEFAULT_MODEL_NAME
     modelKey.value = ''
-    modelMsg.value = '模型已保存并启用'
-    models.value = await props.listModels()
+    modelMsg.value = '模型已保存并启用（已清理历史配置）'
+    const models = await props.listModels()
+    const enabled = models.find((item) => item.enabled) ?? models[0]
+    modelEnabledHint.value = enabled
+      ? `当前启用：${enabled.model}${enabled.baseUrl ? ` · ${enabled.baseUrl}` : ''}`
+      : ''
   } catch (err) {
     modelMsg.value = err instanceof Error ? err.message : '保存失败'
   } finally {
@@ -205,14 +219,14 @@ onMounted(() => {
 
     <div class="card">
       <strong>AI 模型（OpenAI 兼容）</strong>
-      <p class="hint">用于将昨日 Git 变更总结为日报条目。使用 Vercel AI SDK / openai-compatible。</p>
+      <p class="hint">默认按 DeepSeek 官网配置；保存会覆盖旧配置，只保留一份。</p>
       <label class="field">
         API 地址
-        <input v-model="modelBaseUrl" placeholder="https://api.openai.com/v1" />
+        <input v-model="modelBaseUrl" placeholder="https://api.deepseek.com" />
       </label>
       <label class="field">
         模型名称
-        <input v-model="modelName" placeholder="gpt-4o-mini" />
+        <input v-model="modelName" placeholder="deepseek-v4-flash" />
       </label>
       <label class="field">
         API Key (SK)
@@ -222,12 +236,7 @@ onMounted(() => {
         {{ modelBusy ? '保存中…' : '保存并启用模型' }}
       </button>
       <p v-if="modelMsg" class="hint">{{ modelMsg }}</p>
-      <ul v-if="models.length" class="hint model-list">
-        <li v-for="item in models" :key="item.id">
-          {{ item.model }}{{ item.enabled ? ' · 启用中' : '' }}
-          <template v-if="item.baseUrl"> · {{ item.baseUrl }}</template>
-        </li>
-      </ul>
+      <p v-if="modelEnabledHint" class="hint">{{ modelEnabledHint }}</p>
     </div>
   </section>
 </template>

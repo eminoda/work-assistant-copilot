@@ -52,6 +52,10 @@ export class ToolRegistry {
     return this.#tools.has(name)
   }
 
+  get(name: string): Tool | undefined {
+    return this.#tools.get(name)
+  }
+
   list(): Array<Pick<Tool, 'name' | 'description'>> {
     return [...this.#tools.values()].map(({ name, description }) => ({ name, description }))
   }
