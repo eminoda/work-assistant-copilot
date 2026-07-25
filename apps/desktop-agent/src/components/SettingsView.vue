@@ -33,6 +33,7 @@ async function onConnect() {
   <section>
     <div class="eyebrow">LOCAL CONFIGURATION</div>
     <h1>Settings</h1>
+
     <article class="form-card">
       <label>
         Runtime token
@@ -49,9 +50,26 @@ async function onConnect() {
       </button>
       <p v-if="feedback" class="feedback" :data-kind="feedback.kind">{{ feedback.text }}</p>
     </article>
+
+    <article class="form-card settings-note">
+      <h3>配置入口</h3>
+      <p>
+        扫描目录、AI 模型（API 地址 / 模型名 / SK）、立即扫描等业务设置，请在
+        <strong>Chrome 扩展 → 设置</strong> 中完成。本客户端只负责连接本地 Runtime 并执行扫描任务。
+      </p>
+    </article>
+
     <article class="form-card">
       <h3>Security boundary</h3>
       <p>Runtime listens only on 127.0.0.1. Secrets are stored separately from SQLite records.</p>
     </article>
   </section>
 </template>
+
+<style scoped>
+.settings-note p {
+  line-height: 1.55;
+  color: inherit;
+  opacity: 0.9;
+}
+</style>

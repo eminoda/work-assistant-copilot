@@ -3,10 +3,11 @@ import { join } from 'node:path'
 import { PrismaClient, type Prisma } from '@prisma/client'
 import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3'
 import { workflowSchema, workflowStepSchema, type ExecutionResult, type Workflow } from '@workcopilot/workflow-engine'
-import { memoryRecordSchema, type MemoryRecord } from '@workcopilot/memory-engine'
+import { memoryRecordSchema, type MemoryRecord, dailyJournalSchema, type DailyJournal, mergeJournalItem, appendRawMarkdown } from '@workcopilot/memory-engine'
 import { workCopilotHome } from '@workcopilot/credential-provider'
 import { initialSchemaStatements } from './migrations.js'
 import { z } from 'zod'
+import { randomUUID } from 'node:crypto'
 
 const packedStepsSchema = z.object({
   kind: z.enum(['login', 'app']).optional(),
@@ -205,6 +206,133 @@ export class WorkCopilotStore {
   }
   async saveReport(input: { type: string; startDate: string; endDate: string; content: string }) {
     return this.db.report.create({ data: input })
+  }
+
+  private parseJournalRow(row: {
+    id: string
+    date: string
+    items: string | unknown
+    rawMarkdown: string
+    createdAt: string | Date
+    updatedAt: string | Date
+  }): DailyJournal {
+    const itemsRaw = typeof row.items === 'string' ? JSON.parse(row.items) : row.items
+    const toIso = (value: string | Date) => (value instanceof Date ? value.toISOString() : new Date(value).toISOString())
+    return dailyJournalSchema.parse({
+      id: row.id,
+      date: row.date,
+      items: itemsRaw,
+      rawMarkdown: row.rawMarkdown ?? '',
+      createdAt: toIso(row.createdAt),
+      updatedAt: toIso(row.updatedAt),
+    })
+  }
+
+  async listJournals(from?: string, to?: string): Promise<DailyJournal[]> {
+    const rows = await this.db.$queryRawUnsafe<Array<{
+      id: string
+      date: string
+      items: string
+      rawMarkdown: string
+      createdAt: string
+      updatedAt: string
+    }>>(
+      from || to
+        ? `SELECT * FROM "DailyJournal" WHERE "date" >= ? AND "date" <= ? ORDER BY "date" DESC`
+        : `SELECT * FROM "DailyJournal" ORDER BY "date" DESC`,
+      ...(from || to ? [from ?? '0000-01-01', to ?? '9999-12-31'] : []),
+    )
+    return rows.map((row) => this.parseJournalRow(row))
+  }
+
+  async getJournal(date: string): Promise<DailyJournal | undefined> {
+    const rows = await this.db.$queryRawUnsafe<Array<{
+      id: string
+      date: string
+      items: string
+      rawMarkdown: string
+      createdAt: string
+      updatedAt: string
+    }>>(`SELECT * FROM "DailyJournal" WHERE "date" = ? LIMIT 1`, date)
+    const row = rows[0]
+    return row ? this.parseJournalRow(row) : undefined
+  }
+
+  async ensureJournal(date: string): Promise<DailyJournal> {
+    const existing = await this.getJournal(date)
+    if (existing) return existing
+    const id = randomUUID()
+    const now = new Date().toISOString()
+    await this.db.$executeRawUnsafe(
+      `INSERT INTO "DailyJournal" ("id", "date", "items", "rawMarkdown", "createdAt", "updatedAt")
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      id,
+      date,
+      JSON.stringify([]),
+      '',
+      now,
+      now,
+    )
+    const created = await this.getJournal(date)
+    if (!created) throw new Error(`Failed to create journal for ${date}`)
+    return created
+  }
+
+  async addJournalItem(input: {
+    date: string
+    title: string
+    description: string
+    source: 'USER' | 'GIT'
+    rawSection?: string
+  }): Promise<DailyJournal> {
+    const journal = await this.ensureJournal(input.date)
+    const items = mergeJournalItem(journal.items, {
+      title: input.title,
+      description: input.description,
+      source: input.source,
+    })
+    const rawMarkdown = input.rawSection
+      ? appendRawMarkdown(journal.rawMarkdown, input.rawSection)
+      : appendRawMarkdown(
+        journal.rawMarkdown,
+        `## ${input.title.trim()}\n\n- ${input.description.trim()}`,
+      )
+    const now = new Date().toISOString()
+    await this.db.$executeRawUnsafe(
+      `UPDATE "DailyJournal" SET "items" = ?, "rawMarkdown" = ?, "updatedAt" = ? WHERE "date" = ?`,
+      JSON.stringify(items),
+      rawMarkdown,
+      now,
+      input.date,
+    )
+    return (await this.getJournal(input.date))!
+  }
+
+  async upsertProject(input: { name: string; path: string; gitUrl?: string }) {
+    const existing = await this.db.project.findUnique({ where: { path: input.path } })
+    if (existing) {
+      return this.db.project.update({
+        where: { id: existing.id },
+        data: { name: input.name, ...(input.gitUrl ? { gitUrl: input.gitUrl } : {}) },
+      })
+    }
+    return this.db.project.create({ data: input })
+  }
+
+  async saveGitSnapshot(input: {
+    projectId: string
+    commitHash: string
+    changes: unknown
+    summary?: string
+  }) {
+    return this.db.gitSnapshot.create({
+      data: {
+        projectId: input.projectId,
+        commitHash: input.commitHash,
+        changes: input.changes as Prisma.InputJsonValue,
+        ...(input.summary ? { summary: input.summary } : {}),
+      },
+    })
   }
 
   async listModelProviders() {

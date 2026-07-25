@@ -212,6 +212,72 @@ export function useRuntime() {
     await request(`/api/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' })
   }
 
+  async function listJournals(from: string, to: string) {
+    const query = new URLSearchParams({ from, to })
+    return request(`/api/journals?${query}`) as Promise<import('../journalTypes').DailyJournal[]>
+  }
+
+  async function getJournal(date: string) {
+    return request(`/api/journals/${encodeURIComponent(date)}`) as Promise<import('../journalTypes').DailyJournal>
+  }
+
+  async function addJournalItem(date: string, title: string, description: string) {
+    return request(`/api/journals/${encodeURIComponent(date)}/items`, {
+      method: 'POST',
+      body: JSON.stringify({ title, description }),
+    }) as Promise<import('../journalTypes').DailyJournal>
+  }
+
+  async function getSettings() {
+    return request('/api/settings') as Promise<Record<string, string>>
+  }
+
+  async function setScanRoots(roots: string[]) {
+    return request('/api/settings/scan.roots', {
+      method: 'PUT',
+      body: JSON.stringify({ roots }),
+    })
+  }
+
+  async function listModels() {
+    return request('/api/models') as Promise<Array<{
+      id: string
+      name: string
+      providerType: string
+      baseUrl: string | null
+      model: string
+      enabled: boolean
+    }>>
+  }
+
+  async function saveModel(input: {
+    name: string
+    provider: string
+    model: string
+    baseURL?: string
+    apiKey: string
+    enabled?: boolean
+  }) {
+    return request('/api/models', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: input.name,
+        provider: input.provider,
+        model: input.model,
+        apiKey: input.apiKey,
+        enabled: input.enabled ?? true,
+        ...(input.baseURL ? { baseURL: input.baseURL } : {}),
+      }),
+    })
+  }
+
+  async function triggerJournalScan(force = true, lookbackDays = 7) {
+    return request('/api/projects/discover-scan', {
+      method: 'POST',
+      body: JSON.stringify({ force, lookbackDays }),
+    })
+  }
+
   return {
     token,
     workflows: readonly(workflows),
@@ -235,5 +301,13 @@ export function useRuntime() {
     createSchedule,
     setScheduleEnabled,
     deleteSchedule,
+    listJournals,
+    getJournal,
+    addJournalItem,
+    getSettings,
+    setScanRoots,
+    listModels,
+    saveModel,
+    triggerJournalScan,
   }
 }

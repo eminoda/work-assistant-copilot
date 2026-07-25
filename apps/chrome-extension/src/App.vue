@@ -13,11 +13,15 @@ import WorkflowDetailView from './components/WorkflowDetailView.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import NotifyView from './components/NotifyView.vue'
 import type { NotifyMessage, NotifySchedule } from './components/NotifyView.vue'
+import WeeklyReportView from './components/WeeklyReportView.vue'
+import DailyReportView from './components/DailyReportView.vue'
+import DailyReportRawView from './components/DailyReportRawView.vue'
 import { useRuntime } from './composables/useRuntime'
 import type { RecorderState } from './types'
 import type { WorkflowSummary } from './workflowTypes'
 
-const view = shallowRef<'home' | 'settings' | 'notify' | 'chat' | 'record' | 'detail'>('home')
+const view = shallowRef<'home' | 'settings' | 'notify' | 'chat' | 'record' | 'detail' | 'report' | 'report-day' | 'report-raw'>('home')
+const reportDate = shallowRef('')
 const active = shallowRef(false)
 const paused = shallowRef(false)
 const extractArmed = shallowRef(false)
@@ -412,7 +416,22 @@ function leaveSecondary() {
   detailWorkflow.value = null
   detailError.value = ''
   detailDeleteId.value = null
+  reportDate.value = ''
   view.value = 'home'
+}
+
+function openReport() {
+  view.value = 'report'
+}
+
+function openReportDay(date: string) {
+  reportDate.value = date
+  view.value = 'report-day'
+}
+
+function openReportRaw() {
+  if (!reportDate.value) return
+  view.value = 'report-raw'
 }
 
 function onRuntimeMessage(message: RecorderState & { type?: string }) {
@@ -537,7 +556,35 @@ onUnmounted(() => {
       :status="runtime.status.value"
       :initial-token="runtime.token.value"
       :connect="connectFromSettings"
+      :get-settings="runtime.getSettings"
+      :set-scan-roots="runtime.setScanRoots"
+      :list-models="runtime.listModels"
+      :save-model="runtime.saveModel"
+      :trigger-scan="runtime.triggerJournalScan"
       @back="view = 'home'"
+    />
+
+    <WeeklyReportView
+      v-else-if="view === 'report'"
+      :list-journals="runtime.listJournals"
+      @back="leaveSecondary"
+      @open-day="openReportDay"
+    />
+
+    <DailyReportView
+      v-else-if="view === 'report-day' && reportDate"
+      :date="reportDate"
+      :get-journal="runtime.getJournal"
+      :add-item="runtime.addJournalItem"
+      @back="view = 'report'"
+      @open-raw="openReportRaw"
+    />
+
+    <DailyReportRawView
+      v-else-if="view === 'report-raw' && reportDate"
+      :date="reportDate"
+      :get-journal="runtime.getJournal"
+      @back="view = 'report-day'"
     />
 
     <NotifyView
@@ -624,6 +671,7 @@ onUnmounted(() => {
         :unread-count="unreadCount"
         @record="openRecording"
         @notify="openNotify"
+        @report="openReport"
         @chat="view = 'chat'"
       />
       <WorkflowList

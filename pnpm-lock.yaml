@@ -45,9 +45,15 @@ importers:
       '@workcopilot/browser-recorder':
         specifier: workspace:*
         version: link:../../packages/browser-recorder
+      '@workcopilot/memory-engine':
+        specifier: workspace:*
+        version: link:../../packages/memory-engine
       '@workcopilot/workflow-engine':
         specifier: workspace:*
         version: link:../../packages/workflow-engine
+      marked:
+        specifier: ^18.0.7
+        version: 18.0.7
       vue:
         specifier: latest
         version: 3.5.40(typescript@5.9.3)
@@ -82,6 +88,9 @@ importers:
       '@tauri-apps/api':
         specifier: latest
         version: 2.11.1
+      '@workcopilot/memory-engine':
+        specifier: workspace:*
+        version: link:../../packages/memory-engine
       vue:
         specifier: latest
         version: 3.5.40(typescript@5.9.3)
@@ -1952,6 +1961,11 @@ packages:
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
+
+  marked@18.0.7:
+    resolution: {integrity: sha512-iDVQ5ldaiKXn6b2JroX5kgRfmwgqolW7NpaEzTl1k/2Zh1njIEN9yniyLV/mOvWwtsE8OGgkjsCYvijuPk1dtA==}
+    engines: {node: '>= 20'}
+    hasBin: true
 
   mdn-data@2.27.1:
     resolution: {integrity: sha512-9Yubnt3e8A0OKwxYSXyhLymGW4sCufcLG6VdiDdUGVkPhpqLxlvP5vl1983gQjJl3tqbrM731mjaZaP68AgosQ==}
@@ -4111,6 +4125,8 @@ snapshots:
   magic-string@0.30.21:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  marked@18.0.7: {}
 
   mdn-data@2.27.1: {}
 

@@ -15,6 +15,7 @@ import { fallbackSummary, rawMemoryFromGit } from '@workcopilot/memory-engine'
 import { createLanguageModel, ModelProvider, modelConfigSchema } from '@workcopilot/model-provider'
 import { registerExportTools } from '@workcopilot/feishu-adapter'
 import { NameConflictError, WorkCopilotStore } from './store.js'
+import { parseScanRoots, runJournalGitScan, SCAN_ROOTS_KEY } from './journal-scan.js'
 
 export type AppServices = {
   store: WorkCopilotStore
@@ -791,6 +792,24 @@ export function createApp(services: AppServices) {
   }, 30_000)
   scheduler.unref?.()
 
+  // Daily journal git scan: shortly after boot, then every hour (skips if yesterday already done).
+  const runJournalScanSafe = (force = false) => {
+    void runJournalGitScan({
+      store: services.store,
+      credentials: services.credentials,
+      force,
+    }).then((result) => {
+      if (result.projects || result.itemsAdded || result.errors.length) {
+        console.log(
+          `[journal-scan] date=${result.date} projects=${result.projects} withCommits=${result.withCommits} items=${result.itemsAdded} errors=${result.errors.length}`,
+        )
+      }
+    }).catch((error) => console.warn('[journal-scan] failed', error))
+  }
+  setTimeout(() => runJournalScanSafe(false), 60_000).unref?.()
+  const journalScheduler = setInterval(() => runJournalScanSafe(false), 60 * 60_000)
+  journalScheduler.unref?.()
+
   app.get('/api/events', (c) => streamSSE(c, async (stream) => {
     let close = () => {}
     const heartbeat = setInterval(() => void stream.writeSSE({ event: 'heartbeat', data: '{}' }), 15_000)
@@ -825,6 +844,57 @@ export function createApp(services: AppServices) {
   app.post('/api/memories', async (c) => {
     const input = z.object({ date: z.string(), content: z.string().min(1), source: z.enum(['USER', 'GIT', 'FILE']).default('USER'), metadata: z.record(z.string(), z.unknown()).default({}) }).parse(await c.req.json())
     return c.json(await services.store.saveMemory({ ...input, createdAt: new Date().toISOString() }), 201)
+  })
+  app.get('/api/journals', async (c) => {
+    return c.json(await services.store.listJournals(c.req.query('from'), c.req.query('to')))
+  })
+  app.get('/api/journals/:date', async (c) => {
+    const journal = await services.store.getJournal(c.req.param('date'))
+    if (!journal) return c.json({ error: 'Journal not found' }, 404)
+    return c.json(journal)
+  })
+  app.post('/api/journals/:date/items', async (c) => {
+    const date = c.req.param('date')
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: 'Invalid date' }, 400)
+    const input = z.object({
+      title: z.string().min(1),
+      description: z.string().min(1),
+    }).parse(await c.req.json())
+    const journal = await services.store.addJournalItem({
+      date,
+      title: input.title,
+      description: input.description,
+      source: 'USER',
+    })
+    return c.json(journal, 201)
+  })
+  app.put('/api/settings/scan.roots', async (c) => {
+    const body = z.object({
+      roots: z.array(z.string()).optional(),
+      value: z.string().optional(),
+    }).parse(await c.req.json())
+    const value = body.roots
+      ? JSON.stringify(body.roots.map((item) => item.trim()).filter(Boolean))
+      : (body.value ?? '[]')
+    parseScanRoots(value)
+    return c.json(await services.store.setSetting(SCAN_ROOTS_KEY, value))
+  })
+  app.post('/api/projects/discover-scan', async (c) => {
+    const body = z.object({
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      force: z.boolean().optional(),
+      lookbackDays: z.number().int().min(1).max(31).optional(),
+      endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    }).parse(await c.req.json().catch(() => ({})))
+    const result = await runJournalGitScan({
+      store: services.store,
+      credentials: services.credentials,
+      ...(body.date ? { date: body.date } : {}),
+      ...(body.endDate ? { endDate: body.endDate } : {}),
+      lookbackDays: body.lookbackDays ?? (body.date ? 1 : 7),
+      force: body.force ?? true,
+    })
+    return c.json(result)
   })
   app.post('/api/reports', async (c) => {
     const input = z.object({ type: z.enum(['DAILY', 'WEEKLY', 'QUARTERLY', 'YEARLY']), startDate: z.string(), endDate: z.string() }).parse(await c.req.json())

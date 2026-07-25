@@ -11,7 +11,11 @@
     "lint": "vue-tsc --noEmit",
     "test": "vitest run"
   },
-  "dependencies": { "@tauri-apps/api": "latest", "vue": "latest" },
+  "dependencies": {
+    "@tauri-apps/api": "latest",
+    "@workcopilot/memory-engine": "workspace:*",
+    "vue": "latest"
+  },
   "devDependencies": {
     "@tauri-apps/cli": "latest",
     "@vitejs/plugin-vue": "latest",

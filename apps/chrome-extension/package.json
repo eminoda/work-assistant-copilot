@@ -12,7 +12,9 @@
   },
   "dependencies": {
     "@workcopilot/browser-recorder": "workspace:*",
+    "@workcopilot/memory-engine": "workspace:*",
     "@workcopilot/workflow-engine": "workspace:*",
+    "marked": "^18.0.7",
     "vue": "latest",
     "zod": "latest"
   },

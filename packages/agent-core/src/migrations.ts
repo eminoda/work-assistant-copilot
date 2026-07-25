@@ -82,4 +82,13 @@ export const initialSchemaStatements = [
   `CREATE INDEX IF NOT EXISTS "NotifyMessage_unread_idx" ON "NotifyMessage"("unread")`,
   `CREATE UNIQUE INDEX IF NOT EXISTS "NotifyMessage_workflow_label_key" ON "NotifyMessage"("workflowId", "label")`,
   `CREATE INDEX IF NOT EXISTS "NotifySchedule_nextRunAt_idx" ON "NotifySchedule"("nextRunAt")`,
+  `CREATE TABLE IF NOT EXISTS "DailyJournal" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "date" TEXT NOT NULL,
+    "items" JSONB NOT NULL,
+    "rawMarkdown" TEXT NOT NULL DEFAULT '',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS "DailyJournal_date_key" ON "DailyJournal"("date")`,
 ] as const
