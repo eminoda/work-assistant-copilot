@@ -117,6 +117,32 @@ function syncWorkspacePackageIntoDeploy(specifier) {
  * pnpm deploy keeps a deep `.pnpm/<name>@<ver>_<hash>/node_modules/...` tree.
  * NSIS on Windows fails opening those long paths. Materialize a flat node_modules.
  */
+function packageHasDotNode(pkgDir) {
+  const stack = [pkgDir]
+  while (stack.length) {
+    const dir = stack.pop()
+    let entries
+    try {
+      entries = readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const name of entries) {
+      if (name === 'node_modules' || name === '.git') continue
+      const full = join(dir, name)
+      let st
+      try {
+        st = lstatSync(full)
+      } catch {
+        continue
+      }
+      if (st.isDirectory()) stack.push(full)
+      else if (name.endsWith('.node')) return true
+    }
+  }
+  return false
+}
+
 function flattenDeployNodeModules(appDir) {
   const nm = join(appDir, 'node_modules')
   const pnpmDir = join(nm, '.pnpm')
@@ -129,13 +155,27 @@ function flattenDeployNodeModules(appDir) {
   rmSync(staging, { recursive: true, force: true })
   mkdirSync(staging, { recursive: true })
 
-  const packageDirs = []
+  /** @type {Map<string, { dir: string, score: number }>} */
+  const bestByName = new Map()
 
-  function notePackage(pkgDir) {
-    if (existsSync(join(pkgDir, 'package.json'))) packageDirs.push(pkgDir)
+  function notePackage(pkgDir, prefer) {
+    if (!existsSync(join(pkgDir, 'package.json'))) return
+    let name
+    try {
+      name = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')).name
+    } catch {
+      return
+    }
+    if (!name || typeof name !== 'string') return
+    // Prefer: native .node present, then top-level (synced) copies over ignore-scripts store copies.
+    const score = (packageHasDotNode(pkgDir) ? 100 : 0) + (prefer ? 10 : 0)
+    const prev = bestByName.get(name)
+    if (!prev || score > prev.score) {
+      bestByName.set(name, { dir: pkgDir, score })
+    }
   }
 
-  function walkNodeModules(modulesDir) {
+  function walkNodeModules(modulesDir, prefer) {
     if (!existsSync(modulesDir)) return
     for (const name of readdirSync(modulesDir)) {
       if (name === '.bin' || name === '.pnpm' || name.startsWith('.')) continue
@@ -148,36 +188,27 @@ function flattenDeployNodeModules(appDir) {
       }
       if (name.startsWith('@') && st.isDirectory() && !st.isSymbolicLink()) {
         for (const scoped of readdirSync(full)) {
-          notePackage(join(full, scoped))
+          notePackage(join(full, scoped), prefer)
         }
       } else {
-        notePackage(full)
+        notePackage(full, prefer)
       }
     }
   }
 
+  // Top-level first (includes post-deploy synced better-sqlite3 with native binding).
+  walkNodeModules(nm, true)
   for (const entry of readdirSync(pnpmDir)) {
-    walkNodeModules(join(pnpmDir, entry, 'node_modules'))
+    walkNodeModules(join(pnpmDir, entry, 'node_modules'), false)
   }
-  walkNodeModules(nm)
 
-  const written = new Set()
-  for (const pkgDir of packageDirs) {
-    let name
-    try {
-      name = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')).name
-    } catch {
-      continue
-    }
-    if (!name || typeof name !== 'string' || written.has(name)) continue
-
+  for (const [name, { dir: pkgDir }] of bestByName) {
     const dest = join(staging, ...name.split('/'))
     mkdirSync(dirname(dest), { recursive: true })
     cpSync(pkgDir, dest, { recursive: true, dereference: true })
-    written.add(name)
   }
 
-  console.log(`[prepare-runtime] flattened ${written.size} packages into node_modules (removed .pnpm)`)
+  console.log(`[prepare-runtime] flattened ${bestByName.size} packages into node_modules (removed .pnpm)`)
   rmSync(nm, { recursive: true, force: true })
   renameSync(staging, nm)
 }
@@ -357,10 +388,12 @@ function prepareAppTree() {
   cpSync(prismaGenerated, prismaDest, { recursive: true })
 
   flattenDeployNodeModules(appOut)
+  // Flatten may still pick a store copy without native bindings; force the workspace build in.
+  const sqliteAfterFlat = syncWorkspacePackageIntoDeploy('better-sqlite3')
   pruneUnusedPrismaFiles(appOut)
   pruneNativePackageJunk(appOut)
   assertNoOverlongPaths(appOut)
-  assertHasNativeBinding(join(appOut, 'node_modules/better-sqlite3'), 'better-sqlite3')
+  assertHasNativeBinding(sqliteAfterFlat, 'better-sqlite3')
 
   const serverJs = join(appOut, 'dist/server.js')
   if (!existsSync(serverJs)) {
