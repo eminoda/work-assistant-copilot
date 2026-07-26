@@ -24,8 +24,9 @@ jobs:
       matrix:
         include:
           # windows-2022 keeps VS 2022; windows-latest may ship VS 2026 that node-gyp cannot detect.
+          # Prefer NSIS over MSI: WiX light.exe often fails on GHA (missing VBSCRIPT / .NET 3.5).
           - platform: windows-2022
-            args: ''
+            args: '--bundles nsis'
           - platform: macos-latest
             args: '--target aarch64-apple-darwin'
           - platform: macos-latest
@@ -111,6 +112,7 @@ jobs:
 
             Browser workflows use the system Chrome by default.
             Download the installer for your platform below.
+            Windows: use the NSIS `*-setup.exe` installer.
           releaseDraft: ${{ inputs.draft }}
           prerelease: ${{ inputs.prerelease }}
           args: ${{ matrix.args }}
