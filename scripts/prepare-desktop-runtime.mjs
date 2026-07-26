@@ -8,6 +8,9 @@ import {
   cpSync,
   readdirSync,
   statSync,
+  lstatSync,
+  renameSync,
+  readFileSync,
 } from 'node:fs'
 import { pipeline } from 'node:stream/promises'
 import { execFileSync, execSync } from 'node:child_process'
@@ -24,6 +27,9 @@ const appOut = join(runtimeRoot, 'app')
 const nodeOut = join(runtimeRoot, 'node')
 
 const NODE_VERSION = process.env.WORKCOPILOT_BUNDLE_NODE_VERSION || 'v22.14.0'
+const WINDOWS_NSIS_PATH_BUDGET = 240
+const WINDOWS_RESOURCE_PREFIX =
+  'D:/a/work-assistant-copilot/work-assistant-copilot/apps/desktop-agent/src-tauri/resources/runtime/app'
 
 function platformBundle() {
   const { platform, arch } = process
@@ -105,6 +111,150 @@ function syncWorkspacePackageIntoDeploy(specifier) {
   console.log(`[prepare-runtime] copy ${specifier}: ${src} -> ${dest}`)
   cpSync(src, dest, { recursive: true })
   return dest
+}
+
+/**
+ * pnpm deploy keeps a deep `.pnpm/<name>@<ver>_<hash>/node_modules/...` tree.
+ * NSIS on Windows fails opening those long paths. Materialize a flat node_modules.
+ */
+function flattenDeployNodeModules(appDir) {
+  const nm = join(appDir, 'node_modules')
+  const pnpmDir = join(nm, '.pnpm')
+  if (!existsSync(pnpmDir)) {
+    console.log('[prepare-runtime] no .pnpm store to flatten')
+    return
+  }
+
+  const staging = join(appDir, '.flat-node-modules')
+  rmSync(staging, { recursive: true, force: true })
+  mkdirSync(staging, { recursive: true })
+
+  const packageDirs = []
+
+  function notePackage(pkgDir) {
+    if (existsSync(join(pkgDir, 'package.json'))) packageDirs.push(pkgDir)
+  }
+
+  function walkNodeModules(modulesDir) {
+    if (!existsSync(modulesDir)) return
+    for (const name of readdirSync(modulesDir)) {
+      if (name === '.bin' || name === '.pnpm' || name.startsWith('.')) continue
+      const full = join(modulesDir, name)
+      let st
+      try {
+        st = lstatSync(full)
+      } catch {
+        continue
+      }
+      if (name.startsWith('@') && st.isDirectory() && !st.isSymbolicLink()) {
+        for (const scoped of readdirSync(full)) {
+          notePackage(join(full, scoped))
+        }
+      } else {
+        notePackage(full)
+      }
+    }
+  }
+
+  for (const entry of readdirSync(pnpmDir)) {
+    walkNodeModules(join(pnpmDir, entry, 'node_modules'))
+  }
+  walkNodeModules(nm)
+
+  const written = new Set()
+  for (const pkgDir of packageDirs) {
+    let name
+    try {
+      name = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')).name
+    } catch {
+      continue
+    }
+    if (!name || typeof name !== 'string' || written.has(name)) continue
+
+    const dest = join(staging, ...name.split('/'))
+    mkdirSync(dirname(dest), { recursive: true })
+    cpSync(pkgDir, dest, { recursive: true, dereference: true })
+    written.add(name)
+  }
+
+  console.log(`[prepare-runtime] flattened ${written.size} packages into node_modules (removed .pnpm)`)
+  rmSync(nm, { recursive: true, force: true })
+  renameSync(staging, nm)
+}
+
+function pruneUnusedPrismaFiles(appDir) {
+  const unused = /\.(cockroachdb|mongodb|mysql|postgresql|sqlserver)\./i
+  let removed = 0
+  const stack = [appDir]
+  while (stack.length) {
+    const dir = stack.pop()
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name)
+      let st
+      try {
+        st = lstatSync(full)
+      } catch {
+        continue
+      }
+      if (st.isDirectory()) {
+        if (name === '.git') continue
+        stack.push(full)
+        continue
+      }
+      if (unused.test(name)) {
+        rmSync(full, { force: true })
+        removed += 1
+      }
+    }
+  }
+  console.log(`[prepare-runtime] pruned ${removed} unused prisma engine files`)
+}
+
+function pruneNativePackageJunk(appDir) {
+  const junkDirs = [
+    join(appDir, 'node_modules/better-sqlite3/build/deps'),
+    join(appDir, 'node_modules/better-sqlite3/deps'),
+    join(appDir, 'node_modules/better-sqlite3/src'),
+    join(appDir, 'node_modules/better-sqlite3/build/Release/obj'),
+    join(appDir, 'node_modules/better-sqlite3/build/Release/objtmp'),
+  ]
+  for (const dir of junkDirs) {
+    if (existsSync(dir)) {
+      console.log(`[prepare-runtime] remove ${dir}`)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+  const testExt = join(appDir, 'node_modules/better-sqlite3/build/Release/test_extension.node')
+  if (existsSync(testExt)) rmSync(testExt, { force: true })
+}
+
+function assertNoOverlongPaths(appDir, limit = WINDOWS_NSIS_PATH_BUDGET) {
+  let worst = { len: 0, path: '' }
+  const stack = [appDir]
+  while (stack.length) {
+    const dir = stack.pop()
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name)
+      let st
+      try {
+        st = lstatSync(full)
+      } catch {
+        continue
+      }
+      if (st.isDirectory()) {
+        stack.push(full)
+        continue
+      }
+      const estimated = WINDOWS_RESOURCE_PREFIX.length - appOut.length + full.length
+      if (estimated > worst.len) worst = { len: estimated, path: full }
+      if (estimated > limit) {
+        throw new Error(
+          `Bundled runtime path too long for Windows NSIS (${estimated} chars): ${full}`,
+        )
+      }
+    }
+  }
+  console.log(`[prepare-runtime] longest estimated Windows path: ${worst.len} chars`)
 }
 
 async function download(url, dest) {
@@ -194,7 +344,6 @@ function prepareAppTree() {
   const sqliteDest = syncWorkspacePackageIntoDeploy('better-sqlite3')
   assertHasNativeBinding(sqliteDest, 'better-sqlite3')
 
-  // Keep a real @prisma/client for runtime helpers; generated client is separate.
   const clientDest = syncWorkspacePackageIntoDeploy('@prisma/client')
   console.log(`[prepare-runtime] prisma npm client ready at ${clientDest}`)
 
@@ -206,6 +355,12 @@ function prepareAppTree() {
   rmSync(prismaDest, { recursive: true, force: true })
   console.log(`[prepare-runtime] copy prisma generated ${prismaGenerated} -> ${prismaDest}`)
   cpSync(prismaGenerated, prismaDest, { recursive: true })
+
+  flattenDeployNodeModules(appOut)
+  pruneUnusedPrismaFiles(appOut)
+  pruneNativePackageJunk(appOut)
+  assertNoOverlongPaths(appOut)
+  assertHasNativeBinding(join(appOut, 'node_modules/better-sqlite3'), 'better-sqlite3')
 
   const serverJs = join(appOut, 'dist/server.js')
   if (!existsSync(serverJs)) {

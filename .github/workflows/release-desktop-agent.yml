@@ -31,8 +31,9 @@ jobs:
             args: '--target aarch64-apple-darwin'
           - platform: macos-latest
             args: '--target x86_64-apple-darwin'
+          # AppImage/linuxdeploy is flaky on GHA; ship .deb for Linux.
           - platform: ubuntu-22.04
-            args: ''
+            args: '--bundles deb'
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -113,6 +114,7 @@ jobs:
             Browser workflows use the system Chrome by default.
             Download the installer for your platform below.
             Windows: use the NSIS `*-setup.exe` installer.
+            Linux: use the `.deb` package.
           releaseDraft: ${{ inputs.draft }}
           prerelease: ${{ inputs.prerelease }}
           args: ${{ matrix.args }}

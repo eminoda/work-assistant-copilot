@@ -208,17 +208,21 @@ fn pnpm_candidates() -> Vec<PathBuf> {
 }
 
 fn node_candidates() -> Vec<PathBuf> {
-    let mut list = vec![PathBuf::from(if cfg!(windows) { "node.exe" } else { "node" })];
     #[cfg(windows)]
     {
+        let mut list = vec![PathBuf::from("node.exe")];
         if let Some(program_files) = std::env::var_os("ProgramFiles") {
             list.push(PathBuf::from(&program_files).join("nodejs\\node.exe"));
         }
         if let Some(local) = std::env::var_os("LOCALAPPDATA") {
             list.push(PathBuf::from(&local).join("Programs\\node\\node.exe"));
         }
+        list
     }
-    list
+    #[cfg(not(windows))]
+    {
+        vec![PathBuf::from("node")]
+    }
 }
 
 fn find_tsx_entry(workspace: &Path) -> Option<PathBuf> {
