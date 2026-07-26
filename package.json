@@ -13,7 +13,7 @@
     "typecheck": "turbo run typecheck",
     "test": "vitest run",
     "format": "prettier --write .",
-    "db:generate": "prisma generate --schema apps/desktop-agent/prisma/schema.prisma",
+    "db:generate": "node scripts/prisma-generate.mjs",
     "db:push": "prisma db push --schema apps/desktop-agent/prisma/schema.prisma",
     "runtime": "pnpm --filter @workcopilot/agent-core dev",
     "prepare:desktop-runtime": "node scripts/prepare-desktop-runtime.mjs"

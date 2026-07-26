@@ -197,10 +197,41 @@ function prepareAppTree() {
   const clientDest = syncWorkspacePackageIntoDeploy('@prisma/client')
   console.log(`[prepare-runtime] prisma client ready at ${clientDest}`)
 
+  // Generated client lives beside @prisma/client as node_modules/.prisma, not inside the package.
+  const prismaGenerated = findGeneratedPrismaDir()
+  const prismaDest = join(appOut, 'node_modules/.prisma')
+  rmSync(prismaDest, { recursive: true, force: true })
+  console.log(`[prepare-runtime] copy prisma generated ${prismaGenerated} -> ${prismaDest}`)
+  cpSync(prismaGenerated, prismaDest, { recursive: true })
+
   const serverJs = join(appOut, 'dist/server.js')
   if (!existsSync(serverJs)) {
     throw new Error(`Deployed runtime missing dist/server.js at ${serverJs}`)
   }
+}
+
+function findGeneratedPrismaDir() {
+  const pnpmDir = join(root, 'node_modules/.pnpm')
+  if (!existsSync(pnpmDir)) {
+    throw new Error('node_modules/.pnpm missing; run pnpm install first')
+  }
+  let best = null
+  let bestMtime = -1
+  for (const name of readdirSync(pnpmDir)) {
+    if (!name.startsWith('@prisma+client@')) continue
+    const prismaDir = join(pnpmDir, name, 'node_modules/.prisma')
+    const marker = join(prismaDir, 'client/default.d.ts')
+    if (!existsSync(marker)) continue
+    const mtime = statSync(marker).mtimeMs
+    if (mtime > bestMtime) {
+      best = prismaDir
+      bestMtime = mtime
+    }
+  }
+  if (!best) {
+    throw new Error('Generated Prisma client (.prisma) not found; run pnpm db:generate')
+  }
+  return best
 }
 
 async function main() {
