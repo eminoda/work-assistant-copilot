@@ -15,7 +15,8 @@
     "format": "prettier --write .",
     "db:generate": "prisma generate --schema apps/desktop-agent/prisma/schema.prisma",
     "db:push": "prisma db push --schema apps/desktop-agent/prisma/schema.prisma",
-    "runtime": "pnpm --filter @workcopilot/agent-core dev"
+    "runtime": "pnpm --filter @workcopilot/agent-core dev",
+    "prepare:desktop-runtime": "node scripts/prepare-desktop-runtime.mjs"
   },
   "devDependencies": {
     "@types/node": "latest",

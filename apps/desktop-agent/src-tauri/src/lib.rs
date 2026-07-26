@@ -207,57 +207,238 @@ fn pnpm_candidates() -> Vec<PathBuf> {
     list
 }
 
+fn node_candidates() -> Vec<PathBuf> {
+    let mut list = vec![PathBuf::from(if cfg!(windows) { "node.exe" } else { "node" })];
+    #[cfg(windows)]
+    {
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            list.push(PathBuf::from(&program_files).join("nodejs\\node.exe"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            list.push(PathBuf::from(&local).join("Programs\\node\\node.exe"));
+        }
+    }
+    list
+}
+
+fn find_tsx_entry(workspace: &Path) -> Option<PathBuf> {
+    let direct = [
+        workspace.join("node_modules/tsx/dist/cli.mjs"),
+        workspace.join("packages/agent-core/node_modules/tsx/dist/cli.mjs"),
+    ];
+    for path in direct {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    let pnpm_store = workspace.join("node_modules/.pnpm");
+    if let Ok(entries) = fs::read_dir(&pnpm_store) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("tsx@") {
+                let candidate = entry.path().join("node_modules/tsx/dist/cli.mjs");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn configure_child_command(command: &mut Command, cwd: &Path, path_env: Option<&std::ffi::OsString>) {
+    command
+        .current_dir(cwd)
+        .env("WORKCOPILOT_HEADLESS", "false")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(path) = path_env {
+        command.env("PATH", path);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Hide the console window so Runtime stays attached to the desktop app.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+fn bundled_node_name() -> &'static str {
+    if cfg!(windows) {
+        "node.exe"
+    } else {
+        "node"
+    }
+}
+
+fn looks_like_bundled_runtime(dir: &Path) -> bool {
+    dir.join("node").join(bundled_node_name()).is_file()
+        && dir.join("app").join("dist").join("server.js").is_file()
+}
+
+fn discover_bundled_runtime(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(resource) = app.path().resource_dir() {
+        candidates.push(resource.join("resources/runtime"));
+        candidates.push(resource.join("runtime"));
+        candidates.push(resource);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("resources/runtime"));
+            candidates.push(dir.join("runtime"));
+        }
+    }
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/runtime"));
+
+    for dir in candidates {
+        if looks_like_bundled_runtime(&dir) {
+            eprintln!("[desktop] using bundled runtime at {}", dir.display());
+            return Some(dir);
+        }
+    }
+    None
+}
+
+fn spawn_bundled_runtime(runtime_dir: &Path) -> Result<Child, String> {
+    let node = runtime_dir.join("node").join(bundled_node_name());
+    let server = runtime_dir.join("app").join("dist").join("server.js");
+    let app_dir = runtime_dir.join("app");
+    let mut path_entries = Vec::new();
+    path_entries.push(runtime_dir.join("node"));
+    if let Some(existing) = enriched_path() {
+        for part in std::env::split_paths(&existing) {
+            path_entries.push(part);
+        }
+    }
+    let path_env = std::env::join_paths(path_entries).ok();
+
+    let mut command = Command::new(&node);
+    command.arg(&server);
+    configure_child_command(&mut command, &app_dir, path_env.as_ref());
+    match command.spawn() {
+        Ok(mut child) => {
+            pipe_runtime_logs(child.stdout.take(), "stdout");
+            pipe_runtime_logs(child.stderr.take(), "stderr");
+            eprintln!(
+                "[desktop] spawned bundled runtime via {} {}",
+                node.display(),
+                server.display()
+            );
+            Ok(child)
+        }
+        Err(error) => Err(format!(
+            "无法启动内置 Runtime（{} {}）：{error}",
+            node.display(),
+            server.display()
+        )),
+    }
+}
+
 fn spawn_runtime_process(workspace: &Path) -> Result<Child, String> {
     let path_env = enriched_path();
-    let mut last_error = String::from("pnpm not found");
+    let agent_dir = workspace.join("packages/agent-core");
+    let server_ts = agent_dir.join("src/server.ts");
+    let server_js = agent_dir.join("dist/server.js");
+    let mut last_error = String::from("no launcher succeeded");
 
-    for candidate in pnpm_candidates() {
-        let mut command = Command::new(&candidate);
-        command
-            .args(["--filter", "@workcopilot/agent-core", "dev"])
-            .current_dir(workspace)
-            .env("WORKCOPILOT_HEADLESS", "false")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        if let Some(path) = path_env.as_ref() {
-            command.env("PATH", path);
+    // 1) Prefer direct node launch (no visible cmd window on Windows).
+    if server_js.is_file() {
+        for node in node_candidates() {
+            let mut command = Command::new(&node);
+            command.arg(&server_js);
+            configure_child_command(&mut command, &agent_dir, path_env.as_ref());
+            match command.spawn() {
+                Ok(mut child) => {
+                    pipe_runtime_logs(child.stdout.take(), "stdout");
+                    pipe_runtime_logs(child.stderr.take(), "stderr");
+                    eprintln!(
+                        "[desktop] spawned runtime via {} {}",
+                        node.display(),
+                        server_js.display()
+                    );
+                    return Ok(child);
+                }
+                Err(error) => last_error = format!("{} {}: {error}", node.display(), server_js.display()),
+            }
         }
+    }
+
+    if server_ts.is_file() {
+        if let Some(tsx) = find_tsx_entry(workspace) {
+            for node in node_candidates() {
+                let mut command = Command::new(&node);
+                command.args([tsx.as_os_str(), server_ts.as_os_str()]);
+                configure_child_command(&mut command, &agent_dir, path_env.as_ref());
+                match command.spawn() {
+                    Ok(mut child) => {
+                        pipe_runtime_logs(child.stdout.take(), "stdout");
+                        pipe_runtime_logs(child.stderr.take(), "stderr");
+                        eprintln!(
+                            "[desktop] spawned runtime via {} {} {}",
+                            node.display(),
+                            tsx.display(),
+                            server_ts.display()
+                        );
+                        return Ok(child);
+                    }
+                    Err(error) => {
+                        last_error = format!("{} {} {}: {error}", node.display(), tsx.display(), server_ts.display())
+                    }
+                }
+            }
+        }
+    }
+
+    // 2) Fallback: hidden cmd hosting pnpm (still no visible console).
+    for candidate in pnpm_candidates() {
+        #[cfg(windows)]
+        let mut command = {
+            let mut cmd = Command::new("cmd.exe");
+            let cmdline = format!(
+                "\"{}\" --filter @workcopilot/agent-core exec tsx src/server.ts",
+                candidate.display()
+            );
+            cmd.args(["/C", &cmdline]);
+            configure_child_command(&mut cmd, &agent_dir, path_env.as_ref());
+            cmd
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut cmd = Command::new(&candidate);
+            cmd.args(["--filter", "@workcopilot/agent-core", "exec", "tsx", "src/server.ts"]);
+            configure_child_command(&mut cmd, &agent_dir, path_env.as_ref());
+            cmd
+        };
 
         match command.spawn() {
             Ok(mut child) => {
                 pipe_runtime_logs(child.stdout.take(), "stdout");
                 pipe_runtime_logs(child.stderr.take(), "stderr");
                 eprintln!(
-                    "[desktop] spawned runtime via {} in {}",
+                    "[desktop] spawned runtime via pnpm fallback {} in {}",
                     candidate.display(),
-                    workspace.display()
+                    agent_dir.display()
                 );
                 return Ok(child);
             }
-            Err(error) => {
-                last_error = format!("{}: {error}", candidate.display());
-            }
+            Err(error) => last_error = format!("{}: {error}", candidate.display()),
         }
     }
 
     Err(format!(
-        "无法启动 Runtime（找不到可用的 pnpm）。已尝试 PATH 扩展。最后错误：{last_error}"
+        "无法在后台启动 Runtime。请确认已 pnpm install。最后错误：{last_error}"
     ))
 }
 
-fn start_runtime_if_needed(state: &RuntimeProcess) -> Result<(), String> {
+fn start_runtime_if_needed(app: &tauri::AppHandle, state: &RuntimeProcess) -> Result<(), String> {
     if runtime_already_up() {
         return Ok(());
     }
-
-    let workspace = resolve_workspace().ok_or_else(|| {
-        "未找到 WorkCopilot 源码仓库，无法自动拉起 Runtime。\n\
-         请任选其一：\n\
-         1) 在源码目录运行 `pnpm runtime`\n\
-         2) 设置环境变量 WORKCOPILOT_WORKSPACE=你的仓库路径\n\
-         3) 用 `pnpm --filter @workcopilot/desktop-agent tauri dev` 从源码启动桌面端"
-            .to_string()
-    })?;
 
     {
         let mut guard = state
@@ -270,23 +451,34 @@ fn start_runtime_if_needed(state: &RuntimeProcess) -> Result<(), String> {
                 return Ok(());
             }
         }
-        let child = spawn_runtime_process(&workspace)?;
+
+        let child = if let Some(bundled) = discover_bundled_runtime(app) {
+            spawn_bundled_runtime(&bundled)?
+        } else if let Some(workspace) = resolve_workspace() {
+            spawn_runtime_process(&workspace)?
+        } else {
+            return Err(
+                "未找到内置 Runtime，也未找到源码仓库。\n\
+                 请重新安装带 Runtime 的桌面端，或设置 WORKCOPILOT_WORKSPACE 后从源码启动。"
+                    .to_string(),
+            );
+        };
         *guard = Some(child);
     }
 
-    if wait_for_runtime(Duration::from_secs(20)) {
+    if wait_for_runtime(Duration::from_secs(25)) {
         return Ok(());
     }
 
     Err(
-        "已尝试启动 Runtime，但 20 秒内未在 http://127.0.0.1:4317 就绪。请检查源码目录依赖是否已安装（pnpm install）。"
+        "已尝试启动 Runtime，但 25 秒内未在 http://127.0.0.1:4317 就绪。"
             .to_string(),
     )
 }
 
 #[tauri::command]
-fn ensure_runtime(state: State<'_, RuntimeProcess>) -> Result<String, String> {
-    start_runtime_if_needed(&state)?;
+fn ensure_runtime(app: tauri::AppHandle, state: State<'_, RuntimeProcess>) -> Result<String, String> {
+    start_runtime_if_needed(&app, &state)?;
     Ok("ok".into())
 }
 
@@ -331,7 +523,7 @@ pub fn run() {
         })
         .setup(|app| {
             if let Some(state) = app.try_state::<RuntimeProcess>() {
-                if let Err(error) = start_runtime_if_needed(&state) {
+                if let Err(error) = start_runtime_if_needed(app.handle(), &state) {
                     eprintln!("[desktop] startup runtime: {error}");
                 }
             }

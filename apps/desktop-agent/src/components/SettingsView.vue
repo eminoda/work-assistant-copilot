@@ -225,7 +225,7 @@ onMounted(() => {
     <article class="form-card">
       <h3>Runtime Token</h3>
       <p class="hint">首次启动自动生成，保存在本机 <code>~/.workcopilot/credentials/</code>。扩展侧粘贴同一 token 即可连接。</p>
-      <p class="hint">连接前会尝试自动拉起本机 Runtime；若失败，可点「启动 Runtime」，或手动执行 <code>pnpm runtime</code>。</p>
+      <p class="hint">安装版会内置 Runtime，启动应用后自动在后台运行（无 CMD 窗口）。开发模式也可点「启动 Runtime」。</p>
       <label>
         Bearer token
         <input

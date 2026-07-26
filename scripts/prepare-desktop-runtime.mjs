@@ -1,0 +1,168 @@
+import { createWriteStream, existsSync, mkdirSync, rmSync, chmodSync, copyFileSync, cpSync } from 'node:fs'
+import { pipeline } from 'node:stream/promises'
+import { execFileSync, execSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { Readable } from 'node:stream'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const root = join(__dirname, '..')
+const runtimeRoot = join(root, 'apps/desktop-agent/src-tauri/resources/runtime')
+const appOut = join(runtimeRoot, 'app')
+const nodeOut = join(runtimeRoot, 'node')
+
+const NODE_VERSION = process.env.WORKCOPILOT_BUNDLE_NODE_VERSION || 'v22.14.0'
+
+function platformBundle() {
+  const { platform, arch } = process
+  if (platform === 'win32' && arch === 'x64') {
+    return {
+      key: 'win-x64',
+      url: `https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-win-x64.zip`,
+      nodeRel: `node-${NODE_VERSION}-win-x64/node.exe`,
+      nodeName: 'node.exe',
+      kind: 'zip',
+    }
+  }
+  if (platform === 'darwin' && arch === 'arm64') {
+    return {
+      key: 'darwin-arm64',
+      url: `https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-darwin-arm64.tar.gz`,
+      nodeRel: `node-${NODE_VERSION}-darwin-arm64/bin/node`,
+      nodeName: 'node',
+      kind: 'tar.gz',
+    }
+  }
+  if (platform === 'darwin' && arch === 'x64') {
+    return {
+      key: 'darwin-x64',
+      url: `https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-darwin-x64.tar.gz`,
+      nodeRel: `node-${NODE_VERSION}-darwin-x64/bin/node`,
+      nodeName: 'node',
+      kind: 'tar.gz',
+    }
+  }
+  if (platform === 'linux' && arch === 'x64') {
+    return {
+      key: 'linux-x64',
+      url: `https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.gz`,
+      nodeRel: `node-${NODE_VERSION}-linux-x64/bin/node`,
+      nodeName: 'node',
+      kind: 'tar.gz',
+    }
+  }
+  throw new Error(`Unsupported platform for bundled runtime: ${platform}/${arch}`)
+}
+
+function run(cmd, opts = {}) {
+  console.log(`[prepare-runtime] $ ${cmd}`)
+  execSync(cmd, { cwd: root, stdio: 'inherit', shell: true, ...opts })
+}
+
+async function download(url, dest) {
+  console.log(`[prepare-runtime] download ${url}`)
+  const response = await fetch(url)
+  if (!response.ok || !response.body) {
+    throw new Error(`Download failed: ${response.status} ${url}`)
+  }
+  mkdirSync(dirname(dest), { recursive: true })
+  await pipeline(Readable.fromWeb(response.body), createWriteStream(dest))
+}
+
+function extractZip(zipPath, destDir) {
+  mkdirSync(destDir, { recursive: true })
+  if (process.platform === 'win32') {
+    execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-Command', `Expand-Archive -Force -Path '${zipPath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}'`],
+      { stdio: 'inherit' },
+    )
+    return
+  }
+  execFileSync('unzip', ['-o', zipPath, '-d', destDir], { stdio: 'inherit' })
+}
+
+function extractTarGz(archivePath, destDir) {
+  mkdirSync(destDir, { recursive: true })
+  execFileSync('tar', ['-xzf', archivePath, '-C', destDir], { stdio: 'inherit' })
+}
+
+async function ensureNode(bundle) {
+  const marker = join(nodeOut, `.node-${NODE_VERSION}-${bundle.key}`)
+  const nodeBin = join(nodeOut, bundle.nodeName)
+  if (existsSync(nodeBin) && existsSync(marker)) {
+    console.log(`[prepare-runtime] reuse bundled node at ${nodeBin}`)
+    return nodeBin
+  }
+
+  rmSync(nodeOut, { recursive: true, force: true })
+  mkdirSync(nodeOut, { recursive: true })
+  const cacheDir = join(root, '.cache/node-dist')
+  mkdirSync(cacheDir, { recursive: true })
+  const archiveName = bundle.url.split('/').pop()
+  const archivePath = join(cacheDir, archiveName)
+  if (!existsSync(archivePath)) {
+    await download(bundle.url, archivePath)
+  }
+
+  const extractDir = join(cacheDir, `extract-${bundle.key}`)
+  rmSync(extractDir, { recursive: true, force: true })
+  mkdirSync(extractDir, { recursive: true })
+  if (bundle.kind === 'zip') extractZip(archivePath, extractDir)
+  else extractTarGz(archivePath, extractDir)
+
+  const extractedNode = join(extractDir, bundle.nodeRel)
+  if (!existsSync(extractedNode)) {
+    throw new Error(`Node binary missing after extract: ${extractedNode}`)
+  }
+  copyFileSync(extractedNode, nodeBin)
+  if (process.platform !== 'win32') chmodSync(nodeBin, 0o755)
+  // Write marker after successful copy
+  const hash = createHash('sha256').update(NODE_VERSION + bundle.key).digest('hex').slice(0, 12)
+  await pipeline(Readable.from([hash]), createWriteStream(marker))
+  console.log(`[prepare-runtime] bundled node -> ${nodeBin}`)
+  return nodeBin
+}
+
+function prepareAppTree() {
+  console.log('[prepare-runtime] build agent-core workspace packages')
+  run('pnpm db:generate')
+  run('pnpm --filter @workcopilot/agent-core... build')
+
+  rmSync(appOut, { recursive: true, force: true })
+  mkdirSync(dirname(appOut), { recursive: true })
+  console.log(`[prepare-runtime] pnpm deploy -> ${appOut}`)
+  run(`pnpm --filter @workcopilot/agent-core deploy --prod --legacy "${appOut}"`)
+
+  // Copy the already-generated Prisma client from the workspace into the deploy tree.
+  // `prisma generate` inside the deploy folder fails to resolve @prisma/client under pnpm deploy.
+  const requireFromRoot = createRequire(join(root, 'package.json'))
+  const clientPkg = dirname(requireFromRoot.resolve('@prisma/client/package.json'))
+  const clientDest = join(appOut, 'node_modules/@prisma/client')
+  mkdirSync(dirname(clientDest), { recursive: true })
+  rmSync(clientDest, { recursive: true, force: true })
+  console.log(`[prepare-runtime] copy prisma client ${clientPkg} -> ${clientDest}`)
+  cpSync(clientPkg, clientDest, { recursive: true })
+
+  const serverJs = join(appOut, 'dist/server.js')
+  if (!existsSync(serverJs)) {
+    throw new Error(`Deployed runtime missing dist/server.js at ${serverJs}`)
+  }
+}
+
+async function main() {
+  mkdirSync(runtimeRoot, { recursive: true })
+  const bundle = platformBundle()
+  await ensureNode(bundle)
+  prepareAppTree()
+  console.log('[prepare-runtime] done')
+  console.log(`[prepare-runtime] node: ${join(nodeOut, bundle.nodeName)}`)
+  console.log(`[prepare-runtime] app:  ${join(appOut, 'dist/server.js')}`)
+}
+
+main().catch((error) => {
+  console.error('[prepare-runtime] failed', error)
+  process.exit(1)
+})

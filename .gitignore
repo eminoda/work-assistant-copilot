@@ -5,8 +5,11 @@ coverage/
 *.log
 .env
 .env.local
+.cache/
 apps/desktop-agent/src-tauri/target/
 apps/desktop-agent/src-tauri/gen/
+apps/desktop-agent/src-tauri/resources/runtime/app/
+apps/desktop-agent/src-tauri/resources/runtime/node/
 apps/desktop-agent/prisma/dev.db*
 playwright-report/
 test-results/

@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
-import { PrismaClient, type Prisma } from '@prisma/client'
+import type { Prisma } from '@prisma/client'
 import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3'
 import { workflowSchema, workflowStepSchema, type ExecutionResult, type Workflow } from '@workcopilot/workflow-engine'
 import { memoryRecordSchema, type MemoryRecord, dailyJournalSchema, type DailyJournal, mergeJournalItem, appendRawMarkdown, hashGitJournalContent, localToday } from '@workcopilot/memory-engine'
@@ -8,6 +9,13 @@ import { workCopilotHome } from '@workcopilot/credential-provider'
 import { initialSchemaStatements, journalColumnMigrations } from './migrations.js'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
+
+// Prisma client is CJS; createRequire keeps Node ESM (bundled runtime) happy.
+const require = createRequire(import.meta.url)
+const { PrismaClient } = require('@prisma/client') as {
+  PrismaClient: typeof import('@prisma/client').PrismaClient
+}
+type PrismaClient = InstanceType<typeof PrismaClient>
 
 const packedStepsSchema = z.object({
   kind: z.enum(['login', 'app']).optional(),

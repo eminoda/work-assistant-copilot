@@ -64,13 +64,8 @@ jobs:
         with:
           workspaces: apps/desktop-agent/src-tauri -> target
 
-      # Desktop UI packaging does not need agent-core / better-sqlite3.
-      # Skipping lifecycle scripts avoids slow/failing node-gyp on Windows runners.
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile --filter @workcopilot/desktop-agent... --ignore-scripts
-
-      - name: Rebuild esbuild binary
-        run: pnpm rebuild esbuild
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Build Desktop Agent and upload to GitHub Release
         uses: tauri-apps/tauri-action@v1
@@ -83,9 +78,10 @@ jobs:
           tagName: desktop-v__VERSION__
           releaseName: 'WorkCopilot Desktop v__VERSION__'
           releaseBody: |
-            Desktop Agent installers for this version.
+            Desktop Agent with built-in local Runtime (http://127.0.0.1:4317).
 
-            Download the asset for your platform below.
+            Browser workflows use the system Chrome by default.
+            Download the installer for your platform below.
           releaseDraft: ${{ inputs.draft }}
           prerelease: ${{ inputs.prerelease }}
           args: ${{ matrix.args }}
