@@ -10,9 +10,11 @@ import { initialSchemaStatements, journalColumnMigrations } from './migrations.j
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 
-// Prisma client is CJS; createRequire keeps Node ESM (bundled runtime) happy.
-const require = createRequire(import.meta.url)
-const { PrismaClient } = require('../generated/prisma/index.js') as {
+// Prisma client is CJS. Resolve from process.cwd() so both monorepo (`packages/agent-core`)
+// and the slim desktop runtime (`resources/runtime/app`) find generated/prisma the same way.
+// createRequire(cwd/package.json) works in both ESM source and the CJS esbuild bundle.
+const nodeRequire = createRequire(join(process.cwd(), 'package.json'))
+const { PrismaClient } = nodeRequire(join(process.cwd(), 'generated/prisma/index.js')) as {
   PrismaClient: typeof import('../generated/prisma/client.js').PrismaClient
 }
 type PrismaClient = InstanceType<typeof PrismaClient>

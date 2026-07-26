@@ -1,3 +1,14 @@
+/**
+ * Build a slim desktop Runtime payload for Tauri resources.
+ *
+ * Do NOT ship a pnpm deploy / node_modules tree into NSIS — path length and file
+ * count will keep breaking Windows installers. Instead:
+ *   resources/runtime/
+ *     node/node[.exe]     portable Node (pinned)
+ *     app/server.mjs      esbuild bundle of agent-core
+ *     app/generated/prisma pruned Prisma client
+ *     app/node_modules/   ONLY native / dynamic deps (better-sqlite3, playwright*)
+ */
 import {
   createWriteStream,
   existsSync,
@@ -9,7 +20,7 @@ import {
   readdirSync,
   statSync,
   lstatSync,
-  renameSync,
+  writeFileSync,
   readFileSync,
 } from 'node:fs'
 import { pipeline } from 'node:stream/promises'
@@ -19,12 +30,14 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
+import * as esbuild from 'esbuild'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
 const runtimeRoot = join(root, 'apps/desktop-agent/src-tauri/resources/runtime')
 const appOut = join(runtimeRoot, 'app')
 const nodeOut = join(runtimeRoot, 'node')
+const prismaGenerated = join(root, 'packages/agent-core/generated/prisma')
 
 const NODE_VERSION = process.env.WORKCOPILOT_BUNDLE_NODE_VERSION || 'v22.14.0'
 const WINDOWS_NSIS_PATH_BUDGET = 240
@@ -75,217 +88,6 @@ function platformBundle() {
 function run(cmd, opts = {}) {
   console.log(`[prepare-runtime] $ ${cmd}`)
   execSync(cmd, { cwd: root, stdio: 'inherit', shell: true, ...opts })
-}
-
-function assertHasNativeBinding(packageDir, label) {
-  const stack = [packageDir]
-  while (stack.length) {
-    const dir = stack.pop()
-    for (const name of readdirSync(dir)) {
-      const full = join(dir, name)
-      const st = statSync(full)
-      if (st.isDirectory()) {
-        if (name === 'node_modules' || name === '.git') continue
-        stack.push(full)
-      } else if (name.endsWith('.node')) {
-        console.log(`[prepare-runtime] found native binding for ${label}: ${full}`)
-        return
-      }
-    }
-  }
-  throw new Error(`Native binding (.node) missing for ${label} at ${packageDir}`)
-}
-
-function syncWorkspacePackageIntoDeploy(specifier) {
-  const fromAgent = createRequire(join(root, 'packages/agent-core/package.json'))
-  const fromRoot = createRequire(join(root, 'package.json'))
-  let src
-  try {
-    src = dirname(fromAgent.resolve(`${specifier}/package.json`))
-  } catch {
-    src = dirname(fromRoot.resolve(`${specifier}/package.json`))
-  }
-  const dest = join(appOut, 'node_modules', specifier)
-  mkdirSync(dirname(dest), { recursive: true })
-  rmSync(dest, { recursive: true, force: true })
-  console.log(`[prepare-runtime] copy ${specifier}: ${src} -> ${dest}`)
-  cpSync(src, dest, { recursive: true })
-  return dest
-}
-
-/**
- * pnpm deploy keeps a deep `.pnpm/<name>@<ver>_<hash>/node_modules/...` tree.
- * NSIS on Windows fails opening those long paths. Materialize a flat node_modules.
- */
-function packageHasDotNode(pkgDir) {
-  const stack = [pkgDir]
-  while (stack.length) {
-    const dir = stack.pop()
-    let entries
-    try {
-      entries = readdirSync(dir)
-    } catch {
-      continue
-    }
-    for (const name of entries) {
-      if (name === 'node_modules' || name === '.git') continue
-      const full = join(dir, name)
-      let st
-      try {
-        st = lstatSync(full)
-      } catch {
-        continue
-      }
-      if (st.isDirectory()) stack.push(full)
-      else if (name.endsWith('.node')) return true
-    }
-  }
-  return false
-}
-
-function flattenDeployNodeModules(appDir) {
-  const nm = join(appDir, 'node_modules')
-  const pnpmDir = join(nm, '.pnpm')
-  if (!existsSync(pnpmDir)) {
-    console.log('[prepare-runtime] no .pnpm store to flatten')
-    return
-  }
-
-  const staging = join(appDir, '.flat-node-modules')
-  rmSync(staging, { recursive: true, force: true })
-  mkdirSync(staging, { recursive: true })
-
-  /** @type {Map<string, { dir: string, score: number }>} */
-  const bestByName = new Map()
-
-  function notePackage(pkgDir, prefer) {
-    if (!existsSync(join(pkgDir, 'package.json'))) return
-    let name
-    try {
-      name = JSON.parse(readFileSync(join(pkgDir, 'package.json'), 'utf8')).name
-    } catch {
-      return
-    }
-    if (!name || typeof name !== 'string') return
-    // Prefer: native .node present, then top-level (synced) copies over ignore-scripts store copies.
-    const score = (packageHasDotNode(pkgDir) ? 100 : 0) + (prefer ? 10 : 0)
-    const prev = bestByName.get(name)
-    if (!prev || score > prev.score) {
-      bestByName.set(name, { dir: pkgDir, score })
-    }
-  }
-
-  function walkNodeModules(modulesDir, prefer) {
-    if (!existsSync(modulesDir)) return
-    for (const name of readdirSync(modulesDir)) {
-      if (name === '.bin' || name === '.pnpm' || name.startsWith('.')) continue
-      const full = join(modulesDir, name)
-      let st
-      try {
-        st = lstatSync(full)
-      } catch {
-        continue
-      }
-      if (name.startsWith('@') && st.isDirectory() && !st.isSymbolicLink()) {
-        for (const scoped of readdirSync(full)) {
-          notePackage(join(full, scoped), prefer)
-        }
-      } else {
-        notePackage(full, prefer)
-      }
-    }
-  }
-
-  // Top-level first (includes post-deploy synced better-sqlite3 with native binding).
-  walkNodeModules(nm, true)
-  for (const entry of readdirSync(pnpmDir)) {
-    walkNodeModules(join(pnpmDir, entry, 'node_modules'), false)
-  }
-
-  for (const [name, { dir: pkgDir }] of bestByName) {
-    const dest = join(staging, ...name.split('/'))
-    mkdirSync(dirname(dest), { recursive: true })
-    cpSync(pkgDir, dest, { recursive: true, dereference: true })
-  }
-
-  console.log(`[prepare-runtime] flattened ${bestByName.size} packages into node_modules (removed .pnpm)`)
-  rmSync(nm, { recursive: true, force: true })
-  renameSync(staging, nm)
-}
-
-function pruneUnusedPrismaFiles(appDir) {
-  const unused = /\.(cockroachdb|mongodb|mysql|postgresql|sqlserver)\./i
-  let removed = 0
-  const stack = [appDir]
-  while (stack.length) {
-    const dir = stack.pop()
-    for (const name of readdirSync(dir)) {
-      const full = join(dir, name)
-      let st
-      try {
-        st = lstatSync(full)
-      } catch {
-        continue
-      }
-      if (st.isDirectory()) {
-        if (name === '.git') continue
-        stack.push(full)
-        continue
-      }
-      if (unused.test(name)) {
-        rmSync(full, { force: true })
-        removed += 1
-      }
-    }
-  }
-  console.log(`[prepare-runtime] pruned ${removed} unused prisma engine files`)
-}
-
-function pruneNativePackageJunk(appDir) {
-  const junkDirs = [
-    join(appDir, 'node_modules/better-sqlite3/build/deps'),
-    join(appDir, 'node_modules/better-sqlite3/deps'),
-    join(appDir, 'node_modules/better-sqlite3/src'),
-    join(appDir, 'node_modules/better-sqlite3/build/Release/obj'),
-    join(appDir, 'node_modules/better-sqlite3/build/Release/objtmp'),
-  ]
-  for (const dir of junkDirs) {
-    if (existsSync(dir)) {
-      console.log(`[prepare-runtime] remove ${dir}`)
-      rmSync(dir, { recursive: true, force: true })
-    }
-  }
-  const testExt = join(appDir, 'node_modules/better-sqlite3/build/Release/test_extension.node')
-  if (existsSync(testExt)) rmSync(testExt, { force: true })
-}
-
-function assertNoOverlongPaths(appDir, limit = WINDOWS_NSIS_PATH_BUDGET) {
-  let worst = { len: 0, path: '' }
-  const stack = [appDir]
-  while (stack.length) {
-    const dir = stack.pop()
-    for (const name of readdirSync(dir)) {
-      const full = join(dir, name)
-      let st
-      try {
-        st = lstatSync(full)
-      } catch {
-        continue
-      }
-      if (st.isDirectory()) {
-        stack.push(full)
-        continue
-      }
-      const estimated = WINDOWS_RESOURCE_PREFIX.length - appOut.length + full.length
-      if (estimated > worst.len) worst = { len: estimated, path: full }
-      if (estimated > limit) {
-        throw new Error(
-          `Bundled runtime path too long for Windows NSIS (${estimated} chars): ${full}`,
-        )
-      }
-    }
-  }
-  console.log(`[prepare-runtime] longest estimated Windows path: ${worst.len} chars`)
 }
 
 async function download(url, dest) {
@@ -356,48 +158,238 @@ async function ensureNode(bundle) {
   return nodeBin
 }
 
-function prepareAppTree() {
+function resolvePackageDir(specifier, fromPackageJson) {
+  const req = createRequire(fromPackageJson)
+  let entry
+  try {
+    entry = req.resolve(`${specifier}/package.json`)
+    return dirname(entry)
+  } catch {
+    entry = req.resolve(specifier)
+  }
+  let dir = dirname(entry)
+  for (;;) {
+    const pkgJson = join(dir, 'package.json')
+    if (existsSync(pkgJson)) {
+      try {
+        if (JSON.parse(readFileSync(pkgJson, 'utf8')).name === specifier) return dir
+      } catch {
+        /* keep walking */
+      }
+    }
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  throw new Error(`Cannot resolve package directory for ${specifier}`)
+}
+
+function copyPackageFlat(specifier, fromPackageJson) {
+  const src = resolvePackageDir(specifier, fromPackageJson)
+  const dest = join(appOut, 'node_modules', ...specifier.split('/'))
+  mkdirSync(dirname(dest), { recursive: true })
+  rmSync(dest, { recursive: true, force: true })
+  console.log(`[prepare-runtime] copy ${specifier}: ${src} -> ${dest}`)
+  cpSync(src, dest, { recursive: true, dereference: true })
+  return dest
+}
+
+function packageHasDotNode(pkgDir) {
+  const stack = [pkgDir]
+  while (stack.length) {
+    const dir = stack.pop()
+    for (const name of readdirSync(dir)) {
+      if (name === 'node_modules' || name === '.git') continue
+      const full = join(dir, name)
+      let st
+      try {
+        st = lstatSync(full)
+      } catch {
+        continue
+      }
+      if (st.isDirectory()) stack.push(full)
+      else if (name.endsWith('.node')) return true
+    }
+  }
+  return false
+}
+
+function pruneDir(path) {
+  if (existsSync(path)) rmSync(path, { recursive: true, force: true })
+}
+
+function pruneBetterSqlite3(pkgDir) {
+  for (const rel of [
+    'build/deps',
+    'deps',
+    'src',
+    'build/Release/obj',
+    'build/Release/objtmp',
+  ]) {
+    pruneDir(join(pkgDir, rel))
+  }
+  const testExt = join(pkgDir, 'build/Release/test_extension.node')
+  if (existsSync(testExt)) rmSync(testExt, { force: true })
+}
+
+function pruneUnusedPrismaFiles(dir) {
+  const unused = /\.(cockroachdb|mongodb|mysql|postgresql|sqlserver)\./i
+  let removed = 0
+  const stack = [dir]
+  while (stack.length) {
+    const cur = stack.pop()
+    for (const name of readdirSync(cur)) {
+      const full = join(cur, name)
+      let st
+      try {
+        st = lstatSync(full)
+      } catch {
+        continue
+      }
+      if (st.isDirectory()) {
+        stack.push(full)
+        continue
+      }
+      if (unused.test(name)) {
+        rmSync(full, { force: true })
+        removed += 1
+      }
+    }
+  }
+  console.log(`[prepare-runtime] pruned ${removed} unused prisma engine files`)
+}
+
+function assertNoOverlongPaths(appDir, limit = WINDOWS_NSIS_PATH_BUDGET) {
+  let worst = { len: 0, path: '' }
+  const stack = [appDir]
+  while (stack.length) {
+    const dir = stack.pop()
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name)
+      let st
+      try {
+        st = lstatSync(full)
+      } catch {
+        continue
+      }
+      if (st.isDirectory()) {
+        stack.push(full)
+        continue
+      }
+      const estimated = WINDOWS_RESOURCE_PREFIX.length - appOut.length + full.length
+      if (estimated > worst.len) worst = { len: estimated, path: full }
+      if (estimated > limit) {
+        throw new Error(
+          `Bundled runtime path too long for Windows NSIS (${estimated} chars): ${full}`,
+        )
+      }
+    }
+  }
+  console.log(`[prepare-runtime] longest estimated Windows path: ${worst.len} chars (${worst.path})`)
+}
+
+function countFiles(dir) {
+  let n = 0
+  const stack = [dir]
+  while (stack.length) {
+    const cur = stack.pop()
+    for (const name of readdirSync(cur)) {
+      const full = join(cur, name)
+      const st = statSync(full)
+      if (st.isDirectory()) stack.push(full)
+      else n += 1
+    }
+  }
+  return n
+}
+
+async function bundleServer() {
+  const entry = join(root, 'packages/agent-core/dist/server.js')
+  if (!existsSync(entry)) {
+    throw new Error(`Missing ${entry}; build agent-core first`)
+  }
+  const outfile = join(appOut, 'server.cjs')
+  console.log(`[prepare-runtime] esbuild ${entry} -> ${outfile}`)
+  await esbuild.build({
+    entryPoints: [entry],
+    outfile,
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    target: 'node22',
+    legalComments: 'none',
+    // Native / browser-automation packages stay on disk next to the bundle.
+    external: ['better-sqlite3', 'playwright', 'playwright-core', 'electron'],
+    logLevel: 'info',
+  })
+  return outfile
+}
+
+async function prepareAppTree() {
   console.log('[prepare-runtime] build agent-core workspace packages')
   run('pnpm db:generate')
   run('pnpm --filter @workcopilot/agent-core... build')
 
-  rmSync(appOut, { recursive: true, force: true })
-  mkdirSync(dirname(appOut), { recursive: true })
-  console.log(`[prepare-runtime] pnpm deploy (ignore scripts) -> ${appOut}`)
-  // Avoid recompiling better-sqlite3 during deploy on CI (node-gyp/VS flakiness).
-  run(`pnpm --filter @workcopilot/agent-core deploy --prod --legacy "${appOut}"`, {
-    env: {
-      ...process.env,
-      npm_config_ignore_scripts: 'true',
-    },
-  })
-
-  const sqliteDest = syncWorkspacePackageIntoDeploy('better-sqlite3')
-  assertHasNativeBinding(sqliteDest, 'better-sqlite3')
-
-  const clientDest = syncWorkspacePackageIntoDeploy('@prisma/client')
-  console.log(`[prepare-runtime] prisma npm client ready at ${clientDest}`)
-
-  const prismaGenerated = join(root, 'packages/agent-core/generated/prisma')
   if (!existsSync(join(prismaGenerated, 'index.js'))) {
-    throw new Error(`Generated Prisma client missing at ${prismaGenerated}; run pnpm db:generate`)
+    throw new Error(`Generated Prisma client missing at ${prismaGenerated}`)
   }
+
+  rmSync(appOut, { recursive: true, force: true })
+  mkdirSync(join(appOut, 'node_modules'), { recursive: true })
+
+  writeFileSync(
+    join(appOut, 'package.json'),
+    `${JSON.stringify({ name: 'workcopilot-runtime', private: true, type: 'module' }, null, 2)}\n`,
+  )
+
+  await bundleServer()
+
+  // Prisma generated client (CJS + sqlite wasm) — loaded via process.cwd()/generated/prisma
   const prismaDest = join(appOut, 'generated/prisma')
-  rmSync(prismaDest, { recursive: true, force: true })
-  console.log(`[prepare-runtime] copy prisma generated ${prismaGenerated} -> ${prismaDest}`)
+  console.log(`[prepare-runtime] copy prisma generated -> ${prismaDest}`)
   cpSync(prismaGenerated, prismaDest, { recursive: true })
+  pruneUnusedPrismaFiles(prismaDest)
 
-  flattenDeployNodeModules(appOut)
-  // Flatten may still pick a store copy without native bindings; force the workspace build in.
-  const sqliteAfterFlat = syncWorkspacePackageIntoDeploy('better-sqlite3')
-  pruneUnusedPrismaFiles(appOut)
-  pruneNativePackageJunk(appOut)
+  const fromAgent = join(root, 'packages/agent-core/package.json')
+  const fromPlaywright = join(root, 'packages/playwright-runtime/package.json')
+
+  const sqliteDest = copyPackageFlat('better-sqlite3', fromAgent)
+  pruneBetterSqlite3(sqliteDest)
+  if (!packageHasDotNode(sqliteDest)) {
+    throw new Error(
+      `better-sqlite3 native binding (.node) missing at ${sqliteDest}. ` +
+        `Ensure pnpm install built/downloaded prebuilds for Node ${NODE_VERSION}.`,
+    )
+  }
+
+  // Required by Prisma's generated runtime/client.js when client lives outside node_modules/@prisma/client.
+  copyPackageFlat('@prisma/client-runtime-utils', fromAgent)
+
+  copyPackageFlat('playwright', fromPlaywright)
+  {
+    const playwrightSrcPkg = join(
+      resolvePackageDir('playwright', fromPlaywright),
+      'package.json',
+    )
+    const playwrightCoreSrc = dirname(
+      createRequire(playwrightSrcPkg).resolve('playwright-core/package.json'),
+    )
+    const playwrightCoreDest = join(appOut, 'node_modules/playwright-core')
+    console.log(`[prepare-runtime] copy playwright-core: ${playwrightCoreSrc} -> ${playwrightCoreDest}`)
+    rmSync(playwrightCoreDest, { recursive: true, force: true })
+    cpSync(playwrightCoreSrc, playwrightCoreDest, { recursive: true, dereference: true })
+  }
+
   assertNoOverlongPaths(appOut)
-  assertHasNativeBinding(sqliteAfterFlat, 'better-sqlite3')
 
-  const serverJs = join(appOut, 'dist/server.js')
-  if (!existsSync(serverJs)) {
-    throw new Error(`Deployed runtime missing dist/server.js at ${serverJs}`)
+  const files = countFiles(appOut)
+  console.log(`[prepare-runtime] app payload files: ${files}`)
+  if (files > 2500) {
+    throw new Error(`Runtime app payload still too large (${files} files); expected a slim bundle`)
+  }
+
+  if (!existsSync(join(appOut, 'server.cjs'))) {
+    throw new Error('server.cjs missing after bundle')
   }
 }
 
@@ -405,10 +397,10 @@ async function main() {
   mkdirSync(runtimeRoot, { recursive: true })
   const bundle = platformBundle()
   await ensureNode(bundle)
-  prepareAppTree()
+  await prepareAppTree()
   console.log('[prepare-runtime] done')
   console.log(`[prepare-runtime] node: ${join(nodeOut, bundle.nodeName)}`)
-  console.log(`[prepare-runtime] app:  ${join(appOut, 'dist/server.js')}`)
+  console.log(`[prepare-runtime] app:  ${join(appOut, 'server.cjs')}`)
 }
 
 main().catch((error) => {

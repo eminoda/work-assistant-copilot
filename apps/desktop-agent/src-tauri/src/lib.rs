@@ -281,7 +281,9 @@ fn bundled_node_name() -> &'static str {
 
 fn looks_like_bundled_runtime(dir: &Path) -> bool {
     dir.join("node").join(bundled_node_name()).is_file()
-        && dir.join("app").join("dist").join("server.js").is_file()
+        && (dir.join("app").join("server.cjs").is_file()
+            || dir.join("app").join("server.mjs").is_file()
+            || dir.join("app").join("dist").join("server.js").is_file())
 }
 
 fn discover_bundled_runtime(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -310,8 +312,22 @@ fn discover_bundled_runtime(app: &tauri::AppHandle) -> Option<PathBuf> {
 
 fn spawn_bundled_runtime(runtime_dir: &Path) -> Result<Child, String> {
     let node = runtime_dir.join("node").join(bundled_node_name());
-    let server = runtime_dir.join("app").join("dist").join("server.js");
     let app_dir = runtime_dir.join("app");
+    let server_cjs = app_dir.join("server.cjs");
+    let server_mjs = app_dir.join("server.mjs");
+    let server_legacy = app_dir.join("dist").join("server.js");
+    let server = if server_cjs.is_file() {
+        server_cjs
+    } else if server_mjs.is_file() {
+        server_mjs
+    } else if server_legacy.is_file() {
+        server_legacy
+    } else {
+        return Err(format!(
+            "bundled runtime missing server entry under {}",
+            app_dir.display()
+        ));
+    };
     let mut path_entries = Vec::new();
     path_entries.push(runtime_dir.join("node"));
     if let Some(existing) = enriched_path() {
