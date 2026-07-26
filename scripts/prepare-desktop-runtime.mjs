@@ -1,4 +1,14 @@
-import { createWriteStream, existsSync, mkdirSync, rmSync, chmodSync, copyFileSync, cpSync } from 'node:fs'
+import {
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  rmSync,
+  chmodSync,
+  copyFileSync,
+  cpSync,
+  readdirSync,
+  statSync,
+} from 'node:fs'
 import { pipeline } from 'node:stream/promises'
 import { execFileSync, execSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -61,6 +71,42 @@ function run(cmd, opts = {}) {
   execSync(cmd, { cwd: root, stdio: 'inherit', shell: true, ...opts })
 }
 
+function assertHasNativeBinding(packageDir, label) {
+  const stack = [packageDir]
+  while (stack.length) {
+    const dir = stack.pop()
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name)
+      const st = statSync(full)
+      if (st.isDirectory()) {
+        if (name === 'node_modules' || name === '.git') continue
+        stack.push(full)
+      } else if (name.endsWith('.node')) {
+        console.log(`[prepare-runtime] found native binding for ${label}: ${full}`)
+        return
+      }
+    }
+  }
+  throw new Error(`Native binding (.node) missing for ${label} at ${packageDir}`)
+}
+
+function syncWorkspacePackageIntoDeploy(specifier) {
+  const fromAgent = createRequire(join(root, 'packages/agent-core/package.json'))
+  const fromRoot = createRequire(join(root, 'package.json'))
+  let src
+  try {
+    src = dirname(fromAgent.resolve(`${specifier}/package.json`))
+  } catch {
+    src = dirname(fromRoot.resolve(`${specifier}/package.json`))
+  }
+  const dest = join(appOut, 'node_modules', specifier)
+  mkdirSync(dirname(dest), { recursive: true })
+  rmSync(dest, { recursive: true, force: true })
+  console.log(`[prepare-runtime] copy ${specifier}: ${src} -> ${dest}`)
+  cpSync(src, dest, { recursive: true })
+  return dest
+}
+
 async function download(url, dest) {
   console.log(`[prepare-runtime] download ${url}`)
   const response = await fetch(url)
@@ -76,7 +122,11 @@ function extractZip(zipPath, destDir) {
   if (process.platform === 'win32') {
     execFileSync(
       'powershell.exe',
-      ['-NoProfile', '-Command', `Expand-Archive -Force -Path '${zipPath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}'`],
+      [
+        '-NoProfile',
+        '-Command',
+        `Expand-Archive -Force -Path '${zipPath.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}'`,
+      ],
       { stdio: 'inherit' },
     )
     return
@@ -119,7 +169,6 @@ async function ensureNode(bundle) {
   }
   copyFileSync(extractedNode, nodeBin)
   if (process.platform !== 'win32') chmodSync(nodeBin, 0o755)
-  // Write marker after successful copy
   const hash = createHash('sha256').update(NODE_VERSION + bundle.key).digest('hex').slice(0, 12)
   await pipeline(Readable.from([hash]), createWriteStream(marker))
   console.log(`[prepare-runtime] bundled node -> ${nodeBin}`)
@@ -133,18 +182,20 @@ function prepareAppTree() {
 
   rmSync(appOut, { recursive: true, force: true })
   mkdirSync(dirname(appOut), { recursive: true })
-  console.log(`[prepare-runtime] pnpm deploy -> ${appOut}`)
-  run(`pnpm --filter @workcopilot/agent-core deploy --prod --legacy "${appOut}"`)
+  console.log(`[prepare-runtime] pnpm deploy (ignore scripts) -> ${appOut}`)
+  // Avoid recompiling better-sqlite3 during deploy on CI (node-gyp/VS flakiness).
+  run(`pnpm --filter @workcopilot/agent-core deploy --prod --legacy "${appOut}"`, {
+    env: {
+      ...process.env,
+      npm_config_ignore_scripts: 'true',
+    },
+  })
 
-  // Copy the already-generated Prisma client from the workspace into the deploy tree.
-  // `prisma generate` inside the deploy folder fails to resolve @prisma/client under pnpm deploy.
-  const requireFromRoot = createRequire(join(root, 'package.json'))
-  const clientPkg = dirname(requireFromRoot.resolve('@prisma/client/package.json'))
-  const clientDest = join(appOut, 'node_modules/@prisma/client')
-  mkdirSync(dirname(clientDest), { recursive: true })
-  rmSync(clientDest, { recursive: true, force: true })
-  console.log(`[prepare-runtime] copy prisma client ${clientPkg} -> ${clientDest}`)
-  cpSync(clientPkg, clientDest, { recursive: true })
+  const sqliteDest = syncWorkspacePackageIntoDeploy('better-sqlite3')
+  assertHasNativeBinding(sqliteDest, 'better-sqlite3')
+
+  const clientDest = syncWorkspacePackageIntoDeploy('@prisma/client')
+  console.log(`[prepare-runtime] prisma client ready at ${clientDest}`)
 
   const serverJs = join(appOut, 'dist/server.js')
   if (!existsSync(serverJs)) {
