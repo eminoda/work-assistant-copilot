@@ -1,5 +1,8 @@
 generator client {
   provider = "prisma-client-js"
+  // Stable path inside agent-core so builds don't depend on which
+  // pnpm @prisma/client clone `prisma generate` happened to update.
+  output   = "../../../packages/agent-core/generated/prisma"
 }
 
 datasource db {
